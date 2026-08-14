@@ -64,3 +64,16 @@ curl -s "http://127.0.0.1:3080/plugins/dsh-skin-glass/client.js" | head -3
 - 毛玻璃 backdrop-filter 作用于 `#root > div`（AppFrame 根）；若布局结构变化
   导致选择器失配，面板仍是半透明 + 背景图预模糊，视觉退化有限。
 - 明暗两套令牌均从同一主色调推导：浅色用加深版、深色用提亮版。
+
+## 多皮肤共存（重要）
+
+所有皮肤插件都通过 `ctx.theme.overrideTokens(source, tokens)` 叠加令牌层。主题运行时的
+规则是：**按调用顺序叠加，同一令牌后者覆盖前者**（`overrideSeq` 单调递增）。
+
+- aurora 在插件 apply 时无条件调用（启动即生效）；
+- glass 在**设置了背景图后**才调用（晚于 aurora），所以有图时两者重叠的令牌以 glass 为准；
+- 双方各自独有的令牌互不影响（aurora 的静态色、glass 的动态色阶）；
+- 移除背景图时 glass 的层被 dispose，aurora 完全恢复。
+
+**结论：想纯粹体验某个皮肤，一次只装一个**（`bash uninstall.sh` 切换即可）；
+共存时生效顺序是 glass（有图）> aurora > 内置主题。

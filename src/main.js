@@ -21,8 +21,8 @@ const GLASS_CSS = [
   "body{background:transparent !important}",
   "body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;",
   "background-image:var(--dsh-glass-image,none);background-size:cover;background-position:center;background-repeat:no-repeat;",
-  "filter:blur(5px) saturate(1.15)}",
-  "#root > div{backdrop-filter:blur(var(--dsh-glass-blur,24px)) saturate(1.35)}"
+  "filter:blur(2px) saturate(1.15)}",
+  "#root > div{backdrop-filter:blur(var(--dsh-glass-blur,18px)) saturate(1.35)}"
 ].join("\n");
 
 function ensureChromeTag() {
@@ -120,11 +120,11 @@ const en = {
 /* ── settings row store ───────────────────────────────────────────── */
 
 const createRowStore = () => defineStore({
-  init: () => ({ image: "", blur: 24, ready: false, status: "", error: "" }),
+  init: () => ({ image: "", blur: 18, ready: false, status: "", error: "" }),
   actions: {
     sync: (d, value) => {
       d.image = value && typeof value.image === "string" ? value.image : "";
-      d.blur = value && typeof value.blur === "number" ? value.blur : 24;
+      d.blur = value && typeof value.blur === "number" ? value.blur : 18;
       d.ready = true;
     },
     status: (d, message) => {
@@ -183,7 +183,7 @@ function GlassRow({ t, useStore, chooseFile, clearImage, setBlur }) {
       React.createElement("input", {
         type: "range",
         min: 0,
-        max: 40,
+        max: 48,
         step: 1,
         value: blur,
         style: { flex: 1, minWidth: 120 },
@@ -206,14 +206,14 @@ const STORAGE_KEY = "dsh-skin-glass:v1";
 function readStored() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { image: "", blur: 24 };
+    if (!raw) return { image: "", blur: 18 };
     const parsed = JSON.parse(raw);
     return {
       image: typeof parsed.image === "string" ? parsed.image : "",
-      blur: typeof parsed.blur === "number" ? parsed.blur : 24
+      blur: typeof parsed.blur === "number" ? parsed.blur : 18
     };
   } catch (_read) {
-    return { image: "", blur: 24 };
+    return { image: "", blur: 18 };
   }
 }
 
@@ -232,6 +232,7 @@ function apply(ctx) {
   let stored = readStored();
   let bound;
   let tokenDisposer = null;
+  let accentCache = null;
   let applySeq = 0;
 
   const syncRow = () => {
@@ -239,25 +240,37 @@ function apply(ctx) {
     bound.sync(stored);
   };
 
+  /** Apply (or re-apply) the token layer with the cached accent + current frost. */
+  const applyTokens = () => {
+    if (!accentCache) return;
+    tokenDisposer = ctx.theme.overrideTokens("dsh-skin-glass", glassColor.buildTokens(accentCache, stored.blur / 48));
+  };
+
   /** Re-render the glass chrome and (re)apply the token layer. */
   const refresh = (value) => {
     const image = value && typeof value.image === "string" ? value.image : "";
-    const blur = value && typeof value.blur === "number" ? value.blur : 24;
+    const blur = value && typeof value.blur === "number" ? value.blur : 18;
     const root = document.documentElement;
     const escaped = image.replace(/"/g, '\\"');
     root.style.setProperty("--dsh-glass-image", image ? `url("${escaped}")` : "none");
     root.style.setProperty("--dsh-glass-blur", `${blur}px`);
     if (!image) {
+      accentCache = null;
       if (tokenDisposer) {
         tokenDisposer();
         tokenDisposer = null;
       }
       return;
     }
+    if (accentCache) {
+      applyTokens();   // blur-only change: same accent, new frost
+      return;
+    }
     const seq = ++applySeq;
     extractAccent(image).then((accent) => {
       if (seq !== applySeq) return;
-      tokenDisposer = ctx.theme.overrideTokens("dsh-skin-glass", glassColor.buildTokens(accent));
+      accentCache = accent;
+      applyTokens();
     }).catch((err) => {
       if (seq !== applySeq) return;
       console.error("[dsh-skin-glass] extractAccent failed:", err);

@@ -17,16 +17,11 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-ui-theme",
-        "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-locale"
       ],
       "immediately": true
     }
-  },
-  "dependencies": {
-    "@deepseek-ai/dsh-settings": "0.1.0-rc.6",
-    "@deepseek-ai/schemastery": "^3.18.1"
   },
   "license": "MIT",
   "repository": {

@@ -46,11 +46,7 @@ else
   say "未检测到 dsh CLI，使用 npx @deepseek-ai/dsh（首次会下载，稍候）"
 fi
 
-# ── 3) 安装插件包自身的依赖（宿主侧需要 dsh-settings/schemastery）───
-say "安装插件依赖…"
-(cd "$SKIN_DIR" && pnpm install --prod) || die "插件依赖安装失败：$SKIN_DIR"
-
-# ── 4) 安装并注册 bundle（自动并入 dsh.profile.bundles）──────────────
+# ── 3) 安装并注册 bundle（自动并入 dsh.profile.bundles）──────────────
 say "安装到 profile \"$DSH_PROFILE\"…"
 "${DSH_CMD[@]}" plugin --profile "$DSH_PROFILE" add "$SKIN_DIR"
 
@@ -59,7 +55,7 @@ if [ "$NO_RESTART" = "1" ]; then
   exit 0
 fi
 
-# ── 5) 若 dsh web 正在运行，自动重启使其生效 ─────────────────────────
+# ── 4) 若 dsh web 正在运行，自动重启使其生效 ─────────────────────────
 WEB_PID="$(lsof -tiTCP:"$DSH_WEB_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
 if [ -z "$WEB_PID" ]; then
   say "dsh web 未在运行：启动 dsh web（或 npx @deepseek-ai/dsh web）后刷新页面即可。"
@@ -81,7 +77,7 @@ for i in $(seq 1 60); do
   sleep 0.5
 done
 
-# ── 6) 轮询新服务：boot manifest 出现插件条目即就绪 ──────────────────
+# ── 5) 轮询新服务：boot manifest 出现插件条目即就绪 ──────────────────
 say "等待新服务就绪…"
 for i in $(seq 1 60); do
   if curl -sf "http://127.0.0.1:$DSH_WEB_PORT/" 2>/dev/null | grep -q "dsh-skin-glass"; then

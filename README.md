@@ -26,8 +26,8 @@ bash install.sh
 bash <(curl -fsSL https://raw.githubusercontent.com/noexcs/dsh-skin-glass/main/install.sh)
 ```
 
-安装脚本会自动完成：安装插件依赖 → 安装到 web profile → 自动重启 `dsh web` →
-就绪后提示。刷新页面后到 **设置 → 通用 → 背景图** 选择图片即可生效。
+安装脚本会自动完成：安装到 web profile → 自动重启 `dsh web` → 就绪后提示。
+刷新页面后到 **设置 → 通用 → 背景图** 选择图片即可生效（偏好保存在浏览器本地）。
 
 ## 快速卸载
 

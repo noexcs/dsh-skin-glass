@@ -101,25 +101,38 @@ const zh = {
   "glass.choose": "选择图片",
   "glass.remove": "移除",
   "glass.blur": "毛玻璃强度",
-  "glass.hint": "主题色自动取自背景图，组件呈毛玻璃效果"
+  "glass.hint": "主题色自动取自背景图，组件呈毛玻璃效果",
+  "glass.processing": "正在处理图片…",
+  "glass.error.decode": "图片解码失败：请换一张图片（如 JPG/PNG/WebP）",
+  "glass.error.write": "保存到浏览器存储失败（图片过大或隐私模式）"
 };
 const en = {
   "glass.title": "Background",
   "glass.choose": "Choose image",
   "glass.remove": "Remove",
   "glass.blur": "Frosted blur",
-  "glass.hint": "Theme colors are extracted from the image; surfaces render frosted glass"
+  "glass.hint": "Theme colors are extracted from the image; surfaces render frosted glass",
+  "glass.processing": "Processing image…",
+  "glass.error.decode": "Image decode failed: try another image (JPG/PNG/WebP)",
+  "glass.error.write": "Failed to persist to browser storage (image too large or private mode)"
 };
 
 /* ── settings row store ───────────────────────────────────────────── */
 
 const createRowStore = () => defineStore({
-  init: () => ({ image: "", blur: 24, ready: false }),
+  init: () => ({ image: "", blur: 24, ready: false, status: "", error: "" }),
   actions: {
     sync: (d, value) => {
       d.image = value && typeof value.image === "string" ? value.image : "";
       d.blur = value && typeof value.blur === "number" ? value.blur : 24;
       d.ready = true;
+    },
+    status: (d, message) => {
+      d.status = message;
+    },
+    error: (d, code) => {
+      d.error = code;
+      d.status = "";
     }
   }
 });
@@ -146,8 +159,11 @@ const thumbStyle = {
 };
 const hintStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 };
 
+const errorStyle = { color: "var(--dsw-alias-state-error-primary)", fontSize: 12 };
+const statusStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 };
+
 function GlassRow({ t, useStore, chooseFile, clearImage, setBlur }) {
-  const { image, blur } = useStore((s) => s);
+  const { image, blur, status, error } = useStore((s) => s);
   const fileRef = React.useRef(null);
   const onFile = (e) => {
     const file = e.target.files && e.target.files[0];
@@ -175,27 +191,52 @@ function GlassRow({ t, useStore, chooseFile, clearImage, setBlur }) {
       }),
       React.createElement("span", { style: { fontSize: 12, minWidth: 30 } }, `${blur}px`)
     ),
+    status ? React.createElement("div", { style: statusStyle }, status) : null,
+    error ? React.createElement("div", { style: errorStyle }, error) : null,
     React.createElement("div", { style: hintStyle }, t("glass.hint"))
   );
 }
 
+/* ── persistence (browser-local: the settings wire boundary only exposes
+   the product's hardcoded namespace allowlist, so the skin keeps its own
+   state in localStorage) ─────────────────────────────────────────── */
+
+const STORAGE_KEY = "dsh-skin-glass:v1";
+
+function readStored() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { image: "", blur: 24 };
+    const parsed = JSON.parse(raw);
+    return {
+      image: typeof parsed.image === "string" ? parsed.image : "",
+      blur: typeof parsed.blur === "number" ? parsed.blur : 24
+    };
+  } catch (_read) {
+    return { image: "", blur: 24 };
+  }
+}
+
+function writeStored(value) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+}
+
 /* ── plugin body ──────────────────────────────────────────────────── */
 
-const inject = ["slots", "locale", "settingsScope", "theme"];
+const inject = ["slots", "locale", "theme"];
 
 function apply(ctx) {
   ensureChromeTag();
 
-  const scope = ctx.settingsScope.bind({ namespace: GLASS_NS });
   const store = createRowStore();
+  let stored = readStored();
   let bound;
   let tokenDisposer = null;
   let applySeq = 0;
 
   const syncRow = () => {
     if (!bound) return;
-    const snap = scope.getSnapshot();
-    bound.sync(snap.value);
+    bound.sync(stored);
   };
 
   /** Re-render the glass chrome and (re)apply the token layer. */
@@ -217,31 +258,30 @@ function apply(ctx) {
     extractAccent(image).then((accent) => {
       if (seq !== applySeq) return;
       tokenDisposer = ctx.theme.overrideTokens("dsh-skin-glass", glassColor.buildTokens(accent));
-    }).catch(() => {});
+    }).catch((err) => {
+      if (seq !== applySeq) return;
+      console.error("[dsh-skin-glass] extractAccent failed:", err);
+      bound && bound.error("glass.error.decode");
+    });
   };
 
-  const onScope = () => {
-    const snap = scope.getSnapshot();
-    syncRow();
-    refresh(snap.value);
-  };
+  // initial application from persisted state
+  refresh(stored);
+  console.log("[dsh-skin-glass] ready:", JSON.stringify({
+    image: stored.image ? "set" : "none",
+    blur: stored.blur,
+    theme: typeof ctx.theme.overrideTokens === "function"
+  }));
 
   ctx.effect(() => {
-    const disposers = [
-      scope.subscribe(onScope),
-      () => {
-        if (tokenDisposer) tokenDisposer();
-        tokenDisposer = null;
-        const root = document.documentElement;
-        root.style.removeProperty("--dsh-glass-image");
-        root.style.removeProperty("--dsh-glass-blur");
-      }
-    ];
-    scope.load();
     return () => {
-      for (const dispose of disposers) dispose();
+      if (tokenDisposer) tokenDisposer();
+      tokenDisposer = null;
+      const root = document.documentElement;
+      root.style.removeProperty("--dsh-glass-image");
+      root.style.removeProperty("--dsh-glass-blur");
     };
-  }, "dsh-skin-glass: scope bind + token layer");
+  }, "dsh-skin-glass: token layer");
 
   ctx.effect(() => ctx.locale.register(GLASS_NS, { zh, en }), "dsh-skin-glass: row dictionaries");
 
@@ -256,10 +296,47 @@ function apply(ctx) {
       syncRow();
       return {
         chooseFile: (file) => {
-          processImageFile(file).then((dataUrl) => scope.set("image", dataUrl)).catch(() => {});
+          bound.status("glass.processing");
+          processImageFile(file).then((dataUrl) => {
+            stored = { ...stored, image: dataUrl };
+            try {
+              writeStored(stored);
+            } catch (err) {
+              console.error("[dsh-skin-glass] persist failed:", err);
+              bound.status("");
+              bound.error("glass.error.write");
+              return;
+            }
+            bound.status("");
+            bound.error("");
+            syncRow();
+            refresh(stored);
+          }).catch((err) => {
+            console.error("[dsh-skin-glass] chooseFile failed:", err);
+            bound.status("");
+            bound.error("glass.error.decode");
+          });
         },
-        clearImage: () => scope.set("image", ""),
-        setBlur: (v) => scope.set("blur", Math.round(v))
+        clearImage: () => {
+          stored = { ...stored, image: "" };
+          try {
+            writeStored(stored);
+          } catch (err) {
+            console.error("[dsh-skin-glass] persist failed:", err);
+          }
+          syncRow();
+          refresh(stored);
+        },
+        setBlur: (v) => {
+          stored = { ...stored, blur: Math.round(v) };
+          try {
+            writeStored(stored);
+          } catch (err) {
+            console.error("[dsh-skin-glass] persist failed:", err);
+          }
+          syncRow();
+          refresh(stored);
+        }
       };
     }
   }, GlassRow));

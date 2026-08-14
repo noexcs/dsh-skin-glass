@@ -51,14 +51,24 @@ playwright-core 需要浏览器。本机缓存位于 `~/Library/Caches/ms-playwr
   测完**切回**,并断言 body 上皮肤令牌值复原(如
   `getPropertyValue("--dsh-glass-hovercard-bg")` 回到浅色值),防止把用户偏好留在深色。
 
-## 标准化检查三步走(每次改动都跑)
+## 标准化检查四步走(每次改动都跑)
 
-1. **单测**:`node scripts/check-surfaces.mjs` —— 用 `new Function` 把 `src/main.js`
+`npm test` 会跑完前三步(build → `node --check` → 对比度 → 检测器 → 生命周期);
+第 4 步要真浏览器,单独跑。
+
+1. **检测器单测**:`node scripts/check-surfaces.mjs` —— 用 `new Function` 把 `src/main.js`
    塞进一个**桩掉的浏览器沙箱**(假 `document`/`getComputedStyle`/`MutationObserver`),
    直接驱动 `tagSurface` / `createSurfaceScanner` 的内部行为。皮肤逻辑里凡是「按渲染
    结果决策」的部分都可以照这个模式测——不需要真浏览器,毫秒级回归。
-2. **对比度**:`node scripts/check-contrast.mjs` —— 改任何 alpha/scrim 系数前必跑。
-3. **行为验证**:`node scripts/qa/verify-glass.mjs`(hover 回归 + 状态复原断言 + 设置弹窗
+   > 沙箱的 `document.querySelectorAll` **必须真的能按属性选择器遍历假树**,否则
+   > `stripTags` 之类的清理路径会被桩成空操作,所有卸载断言都是假通过。
+2. **生命周期单测**:`node scripts/check-lifecycle.mjs` —— 同样的沙箱手法,但桩掉的是
+   `processImageFile` / `analyzeImage`,测的是插件本体的状态机:localStorage 归一化与
+   迁移、**换图时是否重新取色**、只调滑块时是否复用分析结果、解码失败是否保住旧壁纸。
+   (换图不重新取色曾是一个真实 bug:`imageCache` 只判真假、不认图,第二张壁纸会一直
+   沿用第一张的主题色。)
+3. **对比度**:`node scripts/check-contrast.mjs` —— 改任何 alpha/scrim 系数前必跑。
+4. **行为验证**:`node scripts/qa/verify-glass.mjs`(hover 回归 + 状态复原断言 + 设置弹窗
    检查),必要时 `--old-bundle` 做基线对比 + `pngdiff` 出像素报告。
 
 ## 定位「某个面板效果消失」的 SOP

@@ -82,21 +82,25 @@ function rgba(rgb, a) {
  * @returns clusters [{r,g,b,count}] sorted by population descending.
  */
 function quantize(samples, k, iterations) {
-  k = Math.min(k, Math.max(1, samples.length));
   if (samples.length === 0) return [];
-  let centers = [];
+  k = Math.min(k, samples.length);
+  const centers = [];
   const stride = Math.max(1, Math.floor(samples.length / k));
   for (let i = 0; i < k; i++) centers.push(samples[Math.min(i * stride, samples.length - 1)].slice());
   const dist = (p, c) => (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2 + (p[2] - c[2]) ** 2;
+  const nearest = (p) => {
+    let best = 0;
+    let bd = Infinity;
+    for (let i = 0; i < k; i++) {
+      const d = dist(p, centers[i]);
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+  };
   for (let iter = 0; iter < iterations; iter++) {
     const sums = Array.from({ length: k }, () => [0, 0, 0, 0]);
     for (const p of samples) {
-      let best = 0;
-      let bd = Infinity;
-      for (let i = 0; i < k; i++) {
-        const d = dist(p, centers[i]);
-        if (d < bd) { bd = d; best = i; }
-      }
+      const best = nearest(p);
       sums[best][0] += p[0];
       sums[best][1] += p[1];
       sums[best][2] += p[2];
@@ -108,15 +112,7 @@ function quantize(samples, k, iterations) {
     }
   }
   const clusters = centers.map((c) => ({ r: Math.round(c[0]), g: Math.round(c[1]), b: Math.round(c[2]), count: 0 }));
-  for (const p of samples) {
-    let best = 0;
-    let bd = Infinity;
-    for (let i = 0; i < k; i++) {
-      const d = dist(p, centers[i]);
-      if (d < bd) { bd = d; best = i; }
-    }
-    clusters[best].count += 1;
-  }
+  for (const p of samples) clusters[nearest(p)].count += 1;
   return clusters.sort((a, b) => b.count - a.count);
 }
 
@@ -186,11 +182,16 @@ const BLACK = [0, 0, 0];
 /** Clamp to 0..1. */
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
+/** A finite number, or the fallback. */
+const num = (v, fallback) => (typeof v === "number" && isFinite(v) ? v : fallback);
+
 /** Default translucency when the caller passes nothing. */
 const DEFAULT_T = 0.45;
+/** Default wallpaper blur radius, mirroring main.js's DEFAULT_BLUR. */
+const DEFAULT_BLUR_PX = 18;
 
 /** Translucency 0..1 — 0 is the most legible (near-opaque), 1 the most see-through. */
-const clampT = (t) => Math.max(0, Math.min(1, typeof t === "number" && isFinite(t) ? t : DEFAULT_T));
+const clampT = (t) => clamp01(num(t, DEFAULT_T));
 
 /** One { light, dark } token pair. */
 const pair = (light, dark) => ({ light, dark });
@@ -236,7 +237,7 @@ function nestedTintScale(t) {
 function buildTokens(accent, options = {}) {
   const a = accent;
   const t = clampT(options.t);
-  const blurPx = typeof options.blurPx === "number" && isFinite(options.blurPx) ? Math.max(0, options.blurPx) : 18;
+  const blurPx = Math.max(0, num(options.blurPx, DEFAULT_BLUR_PX));
   const aLight = tune(a, 0.5, 0.58);      // accent usable on light surfaces
   const aDark = tune(a, 0.74, 0.58);      // accent usable on dark surfaces
   const fillLight = `linear-gradient(135deg, ${rgb(tune(a, 0.5, 0.62))}, ${rgb(tune(a, 0.62, 0.68))})`;
@@ -266,14 +267,17 @@ function buildTokens(accent, options = {}) {
   // which is the floor a featureless black (light mode) or white (dark mode)
   // wallpaper still gets. A friendly image lands far below it and buys real
   // transparency back.
+  //
+  // The 1.6 weight on stdL is calibrated, not guessed: at 1.2 a busy
+  // mid-luminance wallpaper drove the dark-mode sidebar to 4.47:1, just under
+  // AA (scripts/check-contrast.mjs pins this).
+  const CONTRASTINESS_WEIGHT = 1.6;
   const wall = options.wallpaper;
-  const meanL = wall !== undefined && isFinite(wall.meanL) ? clamp01(wall.meanL) : undefined;
-  const stdL = wall !== undefined && isFinite(wall.stdL) ? clamp01(wall.stdL) : 0;
-  // The 1.6 on stdL is calibrated, not guessed: at 1.2 a busy mid-luminance
-  // wallpaper drove the dark-mode sidebar to 4.47:1, just under AA
-  // (scripts/check-contrast.mjs pins this).
-  const needLight = meanL === undefined ? 1 : clamp01(1 - meanL + 1.6 * stdL);
-  const needDark = meanL === undefined ? 1 : clamp01(meanL + 1.6 * stdL);
+  const known = wall !== null && typeof wall === "object" && isFinite(wall.meanL);
+  const meanL = known ? clamp01(wall.meanL) : 0;
+  const stdL = known ? clamp01(num(wall.stdL, 0)) : 0;
+  const needLight = known ? clamp01(1 - meanL + CONTRASTINESS_WEIGHT * stdL) : 1;
+  const needDark = known ? clamp01(meanL + CONTRASTINESS_WEIGHT * stdL) : 1;
   const scrim = pair(
     rgba(WHITE, 0.04 + t * 0.44 * needLight),
     rgba(SCRIM_DARK, 0.06 + t * 0.52 * needDark)
@@ -434,13 +438,11 @@ function buildTokens(accent, options = {}) {
   };
 }
 
+/* The namespace the bundle and the check scripts consume. The conversion and
+   mixing helpers above are internal to the token builder; only the four
+   image→theme entry points and the compositing rule the detector shares with
+   scripts/check-contrast.mjs are exposed. */
 const glassColor = {
-  rgbToHsl,
-  hslToRgb,
-  mix,
-  tune,
-  rgb,
-  rgba,
   quantize,
   pickAccent,
   analyzeWallpaper,

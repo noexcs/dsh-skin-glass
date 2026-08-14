@@ -20,6 +20,22 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 let computedOf = () => ({ backgroundColor: "rgb(0, 0, 0)", position: "static" });
 
+/**
+ * Attribute-selector `querySelectorAll` over the fake tree. The real one is
+ * how `stripTags` finds what to clean up, so stubbing it to `[]` would make
+ * every teardown assertion vacuously pass.
+ */
+function queryAll(selector) {
+  const attrs = selector.split(",").map((s) => s.trim().replace(/^\[|\]$/g, ""));
+  const out = [];
+  const walk = (el) => {
+    if (el === null) return;
+    if (attrs.some((a) => el.hasAttribute(a))) out.push(el);
+    for (const c of el.children) walk(c);
+  };
+  walk(sandbox.document.body);
+  return out;
+}
 
 const sandbox = {
   require: (name) => {
@@ -32,7 +48,7 @@ const sandbox = {
   getComputedStyle: (el) => computedOf(el),
   innerWidth: 1440,
   innerHeight: 900,
-  document: { querySelectorAll: () => [], body: null },
+  document: { querySelectorAll: (s) => queryAll(s), body: null },
   requestIdleCallback: (fn) => fn(),
   MutationObserver: function () {},
   matchMedia: null,
@@ -61,7 +77,10 @@ function makeEl({ bg = "rgba(0, 0, 0, 0)", w = 240, h = 120, position = "static"
       if (k === "background-color") inline.backgroundColor = v;
       if (k === "color") inline.color = v;
     },
-    removeProperty(k) { if (k === "background-color") inline.backgroundColor = ""; }
+    removeProperty(k) {
+      if (k === "background-color") inline.backgroundColor = "";
+      if (k === "color") inline.color = "";
+    }
   };
   const el = {
     nodeType: 1,
@@ -108,7 +127,16 @@ const { tagSurface, createSurfaceScanner, alphaOf, GLASS_CSS, SURFACE_ATTR, SHEE
 // never becomes a containing block for the inline fixed tooltips
 check("sheet rule anchors the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]{position:relative}"), true);
 check("sheet frost rides the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]::before{"), true);
-check("reduced-transparency kills sheet frost too", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]::before{\n-webkit-backdrop-filter:none"), true);
+check("reduced-transparency kills sheet frost too",
+  /@media \(prefers-reduced-transparency: reduce\)\{[\s\S]*\[data-dsh-glass-sheet\]::before\{[^}]*backdrop-filter:none/.test(GLASS_CSS), true);
+// the frost value is emitted from one constant; if a refactor ever lets the
+// two vendor spellings drift, the -webkit- one silently stops matching Safari
+for (const rule of GLASS_CSS.split("\n").filter((l) => l.includes("backdrop-filter:"))) {
+  const webkit = /-webkit-backdrop-filter:([^;}]+)/.exec(rule);
+  const plain = /[^-]backdrop-filter:([^;}]+)/.exec(rule);
+  check(`prefixed and unprefixed frost agree in: ${rule.slice(0, 46)}…`,
+    webkit !== null && plain !== null && webkit[1] === plain[1], true);
+}
 
 // the conversation hover card declares --dsw-hovercard-bg ON ITSELF, out of
 // reach of the body-level token layer; the chrome stylesheet must rebind it
@@ -401,6 +429,39 @@ const scanner11 = createSurfaceScanner();
 scanner11.add(otherShell);
 check("an overlay not painted from the variable is tagged but untouched", otherCard.getAttribute(SURFACE_ATTR), "sm");
 check("its hardcoded text colour is left alone", otherTitle.style.color, "");
+
+/* ── teardown must leave no trace ─────────────────────────────────────
+   Everything the skin writes onto product elements is an inline style whose
+   value only means something while the skin is loaded: a scaled rgba() the
+   product never chose, and a `var(--dsh-glass-*)` colour that resolves to
+   *nothing* once the token layer is disposed (unstyled text). So stop() has
+   to clear the inline styles, not just the marker attributes. */
+
+const downRow = makeEl({ bg: ROW_BG, w: 380, h: 60 });
+const downTitle = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 200, h: 20, color: "rgb(255, 255, 255)" });
+const downCard = makeEl({
+  bg: "rgba(246, 247, 252, 0.852)", w: 244, h: 96, position: "fixed",
+  hovercardVar: "rgba(246, 247, 252, 0.852)", children: [downTitle]
+});
+const downPanel = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 420, h: 700, children: [downRow] });
+const downShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [downPanel, downCard] });
+
+sandbox.document.body = downShell;
+const scanner12 = createSurfaceScanner();
+scanner12.setTintScale(0.3);
+scanner12.add(downShell);
+check("teardown fixture: panel is a sheet", downPanel.hasAttribute(SHEET_ATTR), true);
+check("teardown fixture: row is tinted", downRow.style.backgroundColor, "rgba(80, 90, 120, 0.24)");
+check("teardown fixture: card ink is rebound", downTitle.style.color, "var(--dsh-glass-hovercard-title)");
+
+scanner12.stop();
+check("stop() clears the sheet marker", downPanel.hasAttribute(SHEET_ATTR), false);
+check("stop() clears the surface marker", downCard.hasAttribute(SURFACE_ATTR), false);
+check("stop() restores the row's own background", downRow.style.backgroundColor, "");
+check("stop() clears the tint marker", downRow.hasAttribute(TINT_ATTR), false);
+// the regression this pins: the var() would resolve to nothing after the
+// token layer is disposed, leaving the hover card's text unstyled
+check("stop() restores the hover card's own ink", downTitle.style.color, "");
 
 /* ── report ───────────────────────────────────────────────────────── */
 

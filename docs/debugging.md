@@ -81,6 +81,13 @@ playwright-core 需要浏览器。本机缓存位于 `~/Library/Caches/ms-playwr
   「铺满视口」规则跳过、不挂玻璃。
 - **应用框架 `pI_x6G_frame` 有半透明底色**(约 α 0.62):它位于面板滤镜之下时会被面板的
   滤镜二次饱和/增亮;伪元素磨砂方案下它在伪元素之上、不参与滤镜链(每通道 ~1.5% 色差)。
+- **会话/工作区悬停卡片(HoverCard 原语)**:portal 到 `document.body` 的 fixed 卡片,其规则在
+  **元素自身**上声明 `--dsw-hovercard-bg: #2C2C2E` 并以此画背景,行文字也写死了浅色系
+  (`#fff`/`#cfd3d6`/`#adb2b8`)——body 级令牌覆盖够不到局部声明,所以旧版皮肤里它一直是块
+  不透明黑板。皮肤在 chrome CSS 里用 `html[data-dsh-glass] body > div[class]` 把该变量重绑到
+  `--dsh-glass-hovercard-bg`(浅色=对话框面板材质 bg-layer-2,深色=tooltip 板;全产品仅此一处
+  消费该变量),卡片随之拿到半透明底并被识别器打上 backdrop 磨砂;识别器再用「背景确实由该
+  变量绘制」这条判据认出卡片,把写死的文字色重绑到 label 令牌(见 treatHovercardText)。
 - 类名按构建哈希(`VOzbGW_panel` 等);composer 卡片是 `position:relative`(`uV2eYG_card`)。
 - 设置入口 aria 文本「设置」;命令按钮 aria「命令」、发送按钮 aria「发送消息」、上下文
   环 aria「上下文已用 N%」。

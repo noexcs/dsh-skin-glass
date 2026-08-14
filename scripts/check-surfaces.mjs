@@ -49,14 +49,18 @@ const api = factory(...Object.values(sandbox), {}, { exports: {} });
 
 /* ── fake elements ────────────────────────────────────────────────── */
 
-function makeEl({ bg = "rgba(0, 0, 0, 0)", w = 240, h = 120, position = "static", inlineBg = "", children = [] } = {}) {
+function makeEl({ bg = "rgba(0, 0, 0, 0)", w = 240, h = 120, position = "static", inlineBg = "", children = [], color = "", hovercardVar = "" } = {}) {
   const attrs = new Map();
   // `computed` is what getComputedStyle reports; `style` is the inline
   // declaration — conflating them would hide the "never clobber an inline
   // background the product set" rule
   const inline = {
     backgroundColor: inlineBg,
-    setProperty(k, v) { if (k === "background-color") inline.backgroundColor = v; },
+    color: "",
+    setProperty(k, v) {
+      if (k === "background-color") inline.backgroundColor = v;
+      if (k === "color") inline.color = v;
+    },
     removeProperty(k) { if (k === "background-color") inline.backgroundColor = ""; }
   };
   const el = {
@@ -64,7 +68,7 @@ function makeEl({ bg = "rgba(0, 0, 0, 0)", w = 240, h = 120, position = "static"
     isConnected: true,
     children,
     parentElement: null,
-    computed: { backgroundColor: bg, position },
+    computed: null,
     getBoundingClientRect: () => ({ width: w, height: h }),
     setAttribute: (k, v) => attrs.set(k, v),
     removeAttribute: (k) => attrs.delete(k),
@@ -72,6 +76,12 @@ function makeEl({ bg = "rgba(0, 0, 0, 0)", w = 240, h = 120, position = "static"
     getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
     querySelectorAll: () => [],
     style: inline
+  };
+  el.computed = {
+    backgroundColor: bg,
+    position,
+    color,
+    getPropertyValue: (k) => (k === "--dsw-hovercard-bg" ? hovercardVar : "")
   };
   for (const c of children) c.parentElement = el;
   return el;
@@ -99,6 +109,12 @@ const { tagSurface, createSurfaceScanner, alphaOf, GLASS_CSS, SURFACE_ATTR, SHEE
 check("sheet rule anchors the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]{position:relative}"), true);
 check("sheet frost rides the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]::before{"), true);
 check("reduced-transparency kills sheet frost too", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]::before{\n-webkit-backdrop-filter:none"), true);
+
+// the conversation hover card declares --dsw-hovercard-bg ON ITSELF, out of
+// reach of the body-level token layer; the chrome stylesheet must rebind it
+// to the mode-aware glass token or the card stays an opaque black plate
+check("hovercard local token is rebound to the glass token",
+  GLASS_CSS.includes("html[data-dsh-glass] body > div[class]{--dsw-hovercard-bg:var(--dsh-glass-hovercard-bg) !important}"), true);
 
 // alpha parsing
 check("alphaOf rgb() is opaque", alphaOf("rgb(1, 2, 3)"), 1);
@@ -351,6 +367,40 @@ const scanner7 = createSurfaceScanner();
 scanner7.setTintScale(1);
 scanner7.add(plainShell);
 check("scale of 1 leaves nested fills untouched", plainRow.hasAttribute(TINT_ATTR), false);
+
+/* ── regression: the hover card's hardcoded text palette is rebound ───
+   The product's HoverCard paints its background from the locally-declared
+   --dsw-hovercard-bg (rebound by the chrome stylesheet) but hardcodes its
+   row text as light-on-dark (#fff / #cfd3d6 / #adb2b8). Once the card is a
+   glass surface, that palette must be rebound to the per-mode hovercard
+   tokens so light mode reads like the rename dialog's ink/grey text and dark
+   mode resolves to the exact hardcoded values. The rebinding may only fire
+   for the element that actually *paints* its background from the variable —
+   other portaled overlays merely inherit it and must be left alone. */
+
+const hcTitle = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 200, h: 20, color: "rgb(255, 255, 255)" });
+const hcTime = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 200, h: 16, color: "rgb(207, 211, 214)" });
+const hcStatus = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 200, h: 20, color: "rgb(173, 178, 184)" });
+const hoverCard = makeEl({ bg: "rgba(246, 247, 252, 0.852)", w: 244, h: 96, position: "fixed", hovercardVar: "rgba(246, 247, 252, 0.852)", children: [hcTitle, hcTime, hcStatus] });
+const hcShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [hoverCard] });
+
+sandbox.document.body = hcShell;
+const scanner10 = createSurfaceScanner();
+scanner10.add(hcShell);
+check("hover card is tagged as a surface", hoverCard.getAttribute(SURFACE_ATTR), "sm");
+check("hardcoded white title is rebound to the title token", hcTitle.style.color, "var(--dsh-glass-hovercard-title)");
+check("hardcoded grey time is rebound to the meta token", hcTime.style.color, "var(--dsh-glass-hovercard-meta)");
+check("hardcoded grey status is rebound to the caption token", hcStatus.style.color, "var(--dsh-glass-hovercard-caption)");
+
+// a fixed overlay that merely inherits the variable must not be treated
+const otherTitle = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 200, h: 20, color: "rgb(255, 255, 255)" });
+const otherCard = makeEl({ bg: "rgba(246, 247, 252, 0.852)", w: 244, h: 96, position: "fixed", children: [otherTitle] });
+const otherShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [otherCard] });
+sandbox.document.body = otherShell;
+const scanner11 = createSurfaceScanner();
+scanner11.add(otherShell);
+check("an overlay not painted from the variable is tagged but untouched", otherCard.getAttribute(SURFACE_ATTR), "sm");
+check("its hardcoded text colour is left alone", otherTitle.style.color, "");
 
 /* ── report ───────────────────────────────────────────────────────── */
 

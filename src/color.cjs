@@ -385,6 +385,18 @@ function buildTokens(accent, options = {}) {
     "--dsw-specific-menu": pair(rgba(WHITE, aTop), rgba([26, 33, 56], aTop)),
     "--dsw-alias-toast-bg": pair(rgba([24, 28, 38], aTop), rgba([26, 33, 56], aTop)),
     "--dsw-alias-tooltip-bg": pair(rgba([24, 28, 38], aTop), rgba([26, 33, 56], aTop)),
+    // Hover card: light = the dialog-surface material (bg-layer-2, what the
+    // rename/settings dialogs are made of), dark = the always-dark tooltip
+    // plate. The card declares --dsw-hovercard-bg on ITSELF, so the chrome
+    // stylesheet rebinds that local variable to this token (see GLASS_CSS);
+    // the pair is what makes the rebinding mode-aware.
+    "--dsh-glass-hovercard-bg": pair(rgba(PAPER, aTop), rgba([26, 33, 56], aTop)),
+    // Hover card text: the rows hardcode a light-on-dark palette. Light mode
+    // rebinds it to the dialog-surface ink/grey scale; dark mode keeps the
+    // product's hardcoded values verbatim, so the dark look never changes.
+    "--dsh-glass-hovercard-title": pair(rgb(INK), "rgb(255, 255, 255)"),
+    "--dsh-glass-hovercard-meta": pair(rgb(INK2), "rgb(207, 211, 214)"),
+    "--dsh-glass-hovercard-caption": pair(rgb([98, 104, 118]), "rgb(173, 178, 184)"),
 
     /* hairlines, hover tints, scrollbars */
     "--dsw-alias-border-l1": edge(0.14),

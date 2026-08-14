@@ -256,6 +256,12 @@ curl -s "http://127.0.0.1:3080/plugins/dsh-skin-glass/client.js" | head -3
 
 ## 已知取舍
 
+- 会话/工作区悬停卡片(HoverCard)在**元素自身**上声明 `--dsw-hovercard-bg: #2C2C2E` 且行文字
+  色写死为浅色系,令牌层(body 级)覆盖够不到;chrome CSS 用结构选择器
+  `html[data-dsh-glass] body > div[class]` 把该变量重绑到 `--dsh-glass-hovercard-bg`
+  (浅色=对话框面板材质、深色=tooltip 板;已核实全产品仅此一处消费该变量,选择器再宽也不影响
+  别的组件),识别器再按「背景确实由该变量绘制」认出卡片并把文字色重绑到 label 令牌。
+
 - 背景图存为 data URL（客户端压缩到 ≤1920px / ~2MB），存 localStorage；
   皮肤属浏览器呈现偏好，不占设置文档/附件系统。
 - 不走 settings 传输的原因：`dsh-host-apiproxy` 的 `exposedNamespaces()`

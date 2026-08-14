@@ -54,6 +54,14 @@
   也永远以视口为参照。伪元素需要面板 `position: relative` 锚定 `inset: 0`（只影响
   absolute 后代，不影响 fixed 后代）。仅当 fixed 元素出现在**真正挂滤镜的浮层**内部
   时，才沿用摘除逻辑，且按快照精确恢复（旧版的重扫会造成标记漂移）。
+- **浮层壳内的面板仍然直挂滤镜**：设置弹窗的外壳是透明的 fixed 容器（被「铺满视口」
+  规则跳过），内部面板是 `position: relative`。面板背后是遮罩和应用内容，若走伪元素
+  磨砂会被遮罩盖住、折射被遮罩的模糊洗掉——这就是「设置面板效果消失」的根因。所以
+  在流元素往上 12 层内遇到 fixed/absolute 外壳时按浮层处理；扫描器下探经过**未标记的**
+  离流外壳时也会重置玻璃上下文，保证重扫（改通透度）后设置面板的滤镜不丢。
+- **嵌套填充按「玻璃区」染色**：位于已标记玻璃区（sheet 或 surface）内的填充元素都会
+  按 `nestedTintScale` 缩放 alpha——包括经 MutationObserver 增补进 DOM 的子树（设置弹窗
+  的面板、遮罩都在侧栏 sheet 区内，不染色就会叠成实心）。这是属性级查找，零样式开销。
 - **跳过铺满视口的面**：它背后只有壁纸（本来就模糊过了），是全应用最贵的一次 backdrop
   却没有任何视觉收益。跳过但**继续下探**。
 - **alpha < 0.2 的不算**：那是 hover 着色，不是表面。
@@ -224,7 +232,7 @@ toast 一次覆盖，且不需要任何选择器。深色模式高光必须压�
 pnpm test                       # build + node --check + 对比度断言
 node scripts/build.mjs          # src → lib/client.js
 node scripts/check-contrast.mjs # 10500 组正文对比度断言 + 全令牌结构断言
-node scripts/check-surfaces.mjs # 44 条玻璃面识别断言（含「绝不嵌套」「悬停不摘玻璃」「异色不堆叠」）
+node scripts/check-surfaces.mjs # 52 条玻璃面识别断言（含「绝不嵌套」「悬停不摘玻璃」「设置弹窗不丢玻璃」「异色不堆叠」）
 node -e "require('./src/color.cjs')"  # 取色数学可直接 node 引用
 ```
 
@@ -263,8 +271,8 @@ curl -s "http://127.0.0.1:3080/plugins/dsh-skin-glass/client.js" | head -3
 - 在流面板的磨砂挂在 `::before` 伪元素上，代价是「面板所在容器的底色不参与滤镜链」
   （旧方案中它位于面板滤镜之下会被饱和/增亮）。实测差异约为每通道 1.5% 的色调偏移，
   肉眼几乎不可辨；换取的是悬停气泡与内联弹窗的包含块问题被结构性消灭。
-- 浮层（fixed/absolute）仍直接挂 backdrop-filter，若产品未来在某个浮层内部再放
-  `position: fixed` 元素，摘除逻辑会按快照精确恢复它。
+- 浮层（fixed/absolute）及浮层壳内的面板仍直接挂 backdrop-filter，若产品未来在某个浮层
+  内部再放 `position: fixed` 元素，摘除逻辑会按快照精确恢复它。
 - 明暗两套令牌均从同一主色调推导：浅色用加深版、深色用提亮版。
 
 ## 多皮肤共存（重要）

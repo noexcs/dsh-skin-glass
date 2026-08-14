@@ -132,6 +132,24 @@ check("in-flow sheet is marked", tagSurface(sheet), true);
 check("in-flow sheet carries the sheet marker", sheet.getAttribute(SHEET_ATTR), "lg");
 check("in-flow sheet gets no direct backdrop marker", sheet.hasAttribute(SURFACE_ATTR), false);
 
+/* ── regression: panels inside an overlay shell keep the real filter ──
+   The settings dialog is a transparent fixed shell (skipped as viewport-
+   filling) whose mask is absolute and whose panel is position:relative.
+   The panel's backdrop is app content, so it must take the direct filter —
+   a sheet pseudo would be buried under the overlay's mask and the frost
+   would vanish (the reported "settings panel lost its glass" regression). */
+
+const settingsPanel = makeEl({ bg: "rgba(246, 247, 252, 0.85)", w: 800, h: 800 });
+const settingsShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position: "fixed", children: [settingsPanel] });
+check("panel inside an overlay shell is tagged", tagSurface(settingsPanel), true);
+check("panel inside an overlay shell takes the real filter", settingsPanel.getAttribute(SURFACE_ATTR), "lg");
+
+// an element inside an already-marked region belongs to the outer marker
+const nested = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 200, h: 100 });
+const markedShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 400, h: 300, children: [nested] });
+markedShell.setAttribute(SHEET_ATTR, "lg");
+check("element inside a marked region is not re-tagged", tagSurface(nested), false);
+
 // a viewport-filling surface has only the (already blurred) wallpaper behind
 // it, so it must be skipped — but its children still need visiting
 const appRoot = makeEl({ bg: "rgba(255, 255, 255, 0.4)", w: 1440, h: 900 });
@@ -261,6 +279,31 @@ menu.children.length = 0;
 bubble.isConnected = false;
 scanner8.checkReleases();
 check("overlay regains its exact marker once the child unmounts", menu.getAttribute(SURFACE_ATTR), "lg");
+
+/* ── regression: the settings dialog keeps frost AND tint ─────────────
+   The dialog's panel sits inside the sidebar's sheet region but under a
+   transparent fixed shell: it must take the real filter (its backdrop is
+   the mask/app content) and its fill must be tinted like any nested fill
+   inside glass — otherwise it compounds toward opacity and the frost is
+   buried (the reported "settings panel lost its glass" regression). */
+
+const dlgPanel = makeEl({ bg: "rgba(246, 247, 252, 0.85)", w: 800, h: 800 });
+const dlgShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position: "fixed", children: [dlgPanel] });
+const sideInner = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 280, h: 800, children: [dlgShell] });
+const sideSheet = makeEl({ bg: "rgba(245, 247, 253, 0.24)", w: 280, h: 900, children: [sideInner] });
+const sideShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [sideSheet] });
+sandbox.document.body = sideShell;
+const scanner9 = createSurfaceScanner();
+scanner9.setTintScale(0.5);
+scanner9.add(sideShell);
+check("dialog panel takes the real filter", dlgPanel.getAttribute(SURFACE_ATTR), "lg");
+check("dialog panel fill is tinted inside the glass region", dlgPanel.getAttribute(TINT_ATTR), "rgba(246, 247, 252, 0.85)");
+check("dialog panel alpha is scaled", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.425)");
+
+// a retag while the dialog is open must keep the panel's frost and tint
+scanner9.retag();
+check("retag with the dialog open keeps the panel's filter", dlgPanel.getAttribute(SURFACE_ATTR), "lg");
+check("retag with the dialog open keeps the panel's tint", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.425)");
 
 /* ── nested fills are tinted, not stacked ─────────────────────────────
    A fill designed for an opaque plate only tints it. Over glass it tints AND

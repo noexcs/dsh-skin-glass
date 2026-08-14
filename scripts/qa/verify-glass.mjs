@@ -19,7 +19,11 @@
  *      ancestor of the bubble may carry a backdrop-filter;
  *   3. after mouse-leave the marker state must equal the baseline exactly
  *      (state-drift regression);
- *   4. open settings: the dialog panel must keep its direct filter and the
+ *   4. dwell on a session row: the portaled hover card must be a tagged glass
+ *      surface with the mode-correct material (dialog surface in light mode,
+ *      tooltip plate in dark) and its hardcoded text palette rebound; after
+ *      mouse-leave it must dismiss and the marker state return to baseline;
+ *   5. open settings: the dialog panel must keep its direct filter and the
  *      panel/mask must stay tinted (see docs/debugging.md).
  *
  * Dependencies: playwright-core (NOT a repo dependency). Install it once:
@@ -132,6 +136,35 @@ function tooltipGeom(needle) {
   };
 }
 
+/** The session/workspace hover card (HoverCard portal, a `body > div` with the
+ *  card class fragment) and whether it is a properly treated glass surface.
+ *  The mode is read from the skin's own token on body — the GUI theme is a
+ *  host setting, not the browser's colour scheme. */
+function hoverCardProbe() {
+  const modeVar = (getComputedStyle(document.body).getPropertyValue("--dsh-glass-hovercard-bg") || "").trim();
+  const light = modeVar.startsWith("rgba(246");
+  const card = Array.from(document.querySelectorAll("body > div")).find((el) => {
+    if (el.id === "root" || el.id === "dsh-glass-filters") return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && String(el.className).includes("card");
+  }) || null;
+  if (!card) return { found: false, light };
+  const cs = getComputedStyle(card);
+  const m = /^rgba?\(([^)]+)\)$/.exec(cs.backgroundColor);
+  let bgA = 1; if (m) { const p = m[1].split(","); bgA = p.length > 3 ? Number(p[3]) : 1; }
+  const content = card.firstElementChild;
+  const title = content ? content.firstElementChild : null;
+  return {
+    found: true,
+    light,
+    surface: card.getAttribute("data-dsh-glass-surface"),
+    bg: cs.backgroundColor,
+    bgA,
+    bf: cs.backdropFilter,
+    titleColor: title ? getComputedStyle(title).color : null
+  };
+}
+
 function dialogDump() {
   const fixed = Array.from(document.querySelectorAll("body *")).filter((el) => getComputedStyle(el).position === "fixed");
   const big = fixed.filter((el) => { const r = el.getBoundingClientRect(); return r.width > 300 && r.height > 300; })
@@ -223,6 +256,50 @@ async function phase(name, serveOld, prefix) {
       `surfaces ${baseline.nSurface}->${after.nSurface}, sheets ${baseline.nSheet}->${after.nSheet}`);
   } else {
     verdict(false, "command button found", "no [aria-label*=命令] button in the composer");
+  }
+
+  // session hover card: dwell on a session row (treeitem #2; #1 is the
+  // workspace header, which may have no card). Skipped when no sessions exist.
+  const sessionRow = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll("[role=treeitem]"));
+    if (rows.length < 2) return null;
+    const r = rows[1].getBoundingClientRect();
+    return { x: Math.round(r.x + 40), y: Math.round(r.y + r.height / 2) };
+  });
+  if (sessionRow) {
+    await page.mouse.move(sessionRow.x, sessionRow.y);
+    await page.waitForTimeout(1400);   // HoverCard openDelayMs is 500ms
+    const card = await page.evaluate(hoverCardProbe);
+    console.log("  hover card:", JSON.stringify(card));
+    verdict(card.found, "session hover card appears on dwell");
+    if (card.found) {
+      verdict(card.surface === "sm", "hover card is a tagged glass surface", `surface=${card.surface}`);
+      verdict(card.bgA > 0 && card.bgA < 1, "hover card background is translucent", `bg=${card.bg}`);
+      verdict(
+        card.light ? card.bg.startsWith("rgba(246, 247, 252,") : card.bg.startsWith("rgba(26, 33, 56,"),
+        "hover card uses the mode-correct material",
+        `light=${card.light} bg=${card.bg}`
+      );
+      verdict(
+        card.light ? card.titleColor === "rgb(23, 26, 32)" : card.titleColor === "rgb(255, 255, 255)",
+        "hover card title colour is rebound for the mode",
+        `titleColor=${card.titleColor}`
+      );
+      verdict(card.bf !== "none", "hover card carries the backdrop frost", String(card.bf));
+    }
+    await page.mouse.move(400, 60);
+    await page.waitForTimeout(1200);
+    const afterCard = await page.evaluate(() => Array.from(document.querySelectorAll("body > div")).filter((el) => {
+      if (el.id === "root" || el.id === "dsh-glass-filters") return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && String(el.className).includes("card");
+    }).length);
+    const after = await page.evaluate(snapshot);
+    verdict(afterCard === 0 && JSON.stringify(baseline) === JSON.stringify(after),
+      "state restored exactly after the card dismisses",
+      `cards=${afterCard}, surfaces ${baseline.nSurface}->${after.nSurface}`);
+  } else {
+    console.log("  (no session rows — hover card check skipped)");
   }
 
   // settings dialog: panel must keep the direct filter + tint

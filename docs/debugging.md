@@ -46,6 +46,10 @@ playwright-core 需要浏览器。本机缓存位于 `~/Library/Caches/ms-playwr
   `*,*::before,*::after{animation:none!important;transition:none!important}` 冻结。
 - **像素 diff 的判读**:`scripts/qa/pngdiff.cjs` 输出差异像素占比、均值/最大通道差与差异
   包围盒。均值 3–4(每通道 1.5%)通常是色调级细微差异;几十到上百说明合成结构变了,别交。
+- **主题偏好在宿主 settings 文档(`ui-theme/preference`),boot 脚本注入当前值**——playwright
+  的 `colorScheme: "dark"` 模拟**无效**。要验证明暗两态:点 设置 → 外观 的立方体按钮切换,
+  测完**切回**,并断言 body 上皮肤令牌值复原(如
+  `getPropertyValue("--dsh-glass-hovercard-bg")` 回到浅色值),防止把用户偏好留在深色。
 
 ## 标准化检查三步走(每次改动都跑)
 

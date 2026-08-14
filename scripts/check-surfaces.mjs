@@ -43,7 +43,7 @@ const source = readFileSync(join(root, "src/main.js"), "utf8");
 const factory = new Function(
   ...Object.keys(sandbox),
   "exports", "module",
-  `${source}\n;return { tagSurface, createSurfaceScanner, alphaOf, GLASS_CSS, REFRACT_OK, SURFACE_ATTR, MERGE_ATTR, TINT_ATTR, scaleNestedTint };`
+  `${source}\n;return { tagSurface, createSurfaceScanner, alphaOf, GLASS_CSS, REFRACT_OK, SURFACE_ATTR, SHEET_ATTR, MERGE_ATTR, TINT_ATTR, scaleNestedTint };`
 );
 const api = factory(...Object.values(sandbox), {}, { exports: {} });
 
@@ -91,7 +91,14 @@ function check(name, actual, expected) {
   if (a !== e) failures.push(`${name}: expected ${e}, got ${a}`);
 }
 
-const { tagSurface, createSurfaceScanner, alphaOf, SURFACE_ATTR, MERGE_ATTR, TINT_ATTR } = api;
+const { tagSurface, createSurfaceScanner, alphaOf, GLASS_CSS, SURFACE_ATTR, SHEET_ATTR, MERGE_ATTR, TINT_ATTR } = api;
+
+// the pseudo-glass mechanism must be pinned in the chrome stylesheet: sheets
+// get position:relative and the frost rides a ::before, so the sheet itself
+// never becomes a containing block for the inline fixed tooltips
+check("sheet rule anchors the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]{position:relative}"), true);
+check("sheet frost rides the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]::before{"), true);
+check("reduced-transparency kills sheet frost too", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]::before{\n-webkit-backdrop-filter:none"), true);
 
 // alpha parsing
 check("alphaOf rgb() is opaque", alphaOf("rgb(1, 2, 3)"), 1);
@@ -108,18 +115,29 @@ check("hover tint is not a surface", tagSurface(hoverTint), false);
 const tiny = makeEl({ bg: "rgba(255, 255, 255, 0.8)", w: 20, h: 12 });
 check("tiny element is not a surface", tagSurface(tiny), false);
 
-const panel = makeEl({ bg: "rgba(246, 247, 252, 0.72)", w: 800, h: 600 });
-check("dialog is tagged", tagSurface(panel), true);
-check("dialog gets refraction", panel.getAttribute(SURFACE_ATTR), "lg");
+// out-of-flow overlays (menus, dialogs, popovers) take the real filter
+const panel = makeEl({ bg: "rgba(246, 247, 252, 0.72)", w: 800, h: 600, position: "absolute" });
+check("overlay is tagged", tagSurface(panel), true);
+check("overlay gets refraction", panel.getAttribute(SURFACE_ATTR), "lg");
 
-const chip = makeEl({ bg: "rgba(255, 255, 255, 0.8)", w: 90, h: 30 });
-check("small surface is tagged", tagSurface(chip), true);
-check("small surface skips refraction", chip.getAttribute(SURFACE_ATTR), "sm");
+const chip = makeEl({ bg: "rgba(255, 255, 255, 0.8)", w: 90, h: 30, position: "fixed" });
+check("small overlay is tagged", tagSurface(chip), true);
+check("small overlay skips refraction", chip.getAttribute(SURFACE_ATTR), "sm");
+
+// in-flow sheets (columns, cards, rows) get the sheet marker: the frost
+// rides a ::before pseudo, so hover tooltips inside them are never
+// re-anchored
+const sheet = makeEl({ bg: "rgba(255, 255, 255, 0.72)", w: 800, h: 600 });
+check("in-flow sheet is marked", tagSurface(sheet), true);
+check("in-flow sheet carries the sheet marker", sheet.getAttribute(SHEET_ATTR), "lg");
+check("in-flow sheet gets no direct backdrop marker", sheet.hasAttribute(SURFACE_ATTR), false);
 
 // a viewport-filling surface has only the (already blurred) wallpaper behind
 // it, so it must be skipped — but its children still need visiting
 const appRoot = makeEl({ bg: "rgba(255, 255, 255, 0.4)", w: 1440, h: 900 });
 check("viewport-sized surface is skipped", tagSurface(appRoot), false);
+const fullOverlay = makeEl({ bg: "rgba(255, 255, 255, 0.4)", w: 1440, h: 900, position: "fixed" });
+check("viewport-sized overlay is skipped", tagSurface(fullOverlay), false);
 
 /* ── scanner traversal: outermost-only ────────────────────────────── */
 
@@ -132,10 +150,10 @@ sandbox.document.body = viewport;
 const scanner = createSurfaceScanner();
 scanner.add(viewport);
 
-check("viewport root not tagged", viewport.hasAttribute(SURFACE_ATTR), false);
-check("transparent wrapper not tagged", inert.hasAttribute(SURFACE_ATTR), false);
-check("outermost glass tagged", child.hasAttribute(SURFACE_ATTR), true);
-check("nested glass NOT tagged (no stacked backdrop-filters)", grandchild.hasAttribute(SURFACE_ATTR), false);
+check("viewport root not tagged", viewport.hasAttribute(SHEET_ATTR), false);
+check("transparent wrapper not tagged", inert.hasAttribute(SHEET_ATTR), false);
+check("outermost glass tagged as sheet", child.hasAttribute(SHEET_ATTR), true);
+check("nested glass NOT tagged (no stacked filters)", grandchild.hasAttribute(SHEET_ATTR), false);
 
 /* ── stacked repeats of the surface colour must be zeroed ─────────────
    The trajectory panel is `bg-layer-1` with several `bg-layer-1` children
@@ -158,7 +176,7 @@ sandbox.document.body = trajShell;
 const scanner4 = createSurfaceScanner();
 scanner4.add(trajShell);
 
-check("panel itself is the glass surface", trajPanel.getAttribute(SURFACE_ATTR), "lg");
+check("panel itself is the sheet", trajPanel.getAttribute(SHEET_ATTR), "lg");
 check("panel itself is never merged away", trajPanel.hasAttribute(MERGE_ATTR), false);
 check("child repeating the surface colour is zeroed", repeatMid.hasAttribute(MERGE_ATTR), true);
 check("grandchild repeating it is zeroed too", repeatDeep.hasAttribute(MERGE_ATTR), true);
@@ -169,11 +187,14 @@ check(
   false
 );
 
-/* ── regression: fixed-position overlays must escape the containing block ───
+/* ── regression: in-flow sheets must never re-anchor fixed overlays ───
    backdrop-filter makes an element the containing block for its
    position:fixed descendants. The product renders the settings dialog as a
-   `position: fixed; inset: 0` div *inside the sidebar* (no portal), so glass
-   on the sidebar collapsed the dialog to the sidebar's width. */
+   `position: fixed; inset: 0` div *inside the sidebar* (no portal), and its
+   Tooltip bubbles as inline `position: fixed` spans inside the composer.
+   Because sheets carry no filter, neither is re-anchored and nothing is
+   stripped on mount — this is the regression that used to make the glass
+   vanish on every hover. */
 
 const dialog = makeEl({ bg: "rgba(246, 247, 252, 0.72)", w: 800, h: 600 });
 const overlay = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position: "fixed", children: [dialog] });
@@ -184,39 +205,26 @@ const shell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [sideb
 sandbox.document.body = shell;
 const scanner2 = createSurfaceScanner();
 scanner2.add(shell);
-check("sidebar is glass before any modal opens", sidebar.hasAttribute(SURFACE_ATTR), true);
+check("sidebar is marked as a sheet", sidebar.hasAttribute(SHEET_ATTR), true);
 
-// now the dialog mounts inside the (glass) sidebar, as React would insert it
+// the settings dialog mounts inside the sheet, as React would insert it
 sidebarInner.children.push(overlay);
 overlay.parentElement = sidebarInner;
 scanner2.repairFixed(overlay);
-check("sidebar loses glass so the fixed overlay keeps the viewport", sidebar.hasAttribute(SURFACE_ATTR), false);
+check("sheet keeps its marker while the fixed overlay is open", sidebar.hasAttribute(SHEET_ATTR), true);
 
-// a rescan while the dialog is still open must not put it back
+// a rescan while the dialog is open changes nothing either
 scanner2.retag();
-check("suspended ancestor stays un-glassed while the dialog is open", sidebar.hasAttribute(SURFACE_ATTR), false);
-check("dialog inside the freed subtree is still glass", dialog.hasAttribute(SURFACE_ATTR), true);
+check("sheet marker survives a retag with the dialog open", sidebar.hasAttribute(SHEET_ATTR), true);
 
-// ...and closing the dialog must give it back. Suspending permanently was a
-// real regression: the sidebar stayed flat for the rest of the session after
-// settings had been opened once.
+// and closing the dialog is a no-op: nothing was suspended
 sidebarInner.children.length = 0;
 overlay.isConnected = false;
 dialog.isConnected = false;
 scanner2.checkReleases();
-check("sidebar regains glass once the dialog closes", sidebar.hasAttribute(SURFACE_ATTR), true);
+check("sheet marker intact after the dialog closes", sidebar.hasAttribute(SHEET_ATTR), true);
 
-// and it must survive a reopen/close cycle
-sidebarInner.children.push(overlay);
-overlay.isConnected = true;
-scanner2.repairFixed(overlay);
-check("reopening suspends it again", sidebar.hasAttribute(SURFACE_ATTR), false);
-sidebarInner.children.length = 0;
-overlay.isConnected = false;
-scanner2.checkReleases();
-check("closing a second time restores it again", sidebar.hasAttribute(SURFACE_ATTR), true);
-
-// the idle pass alone must also catch it, without the synchronous fast path
+// the idle pass alone must also leave the sheet alone
 const dialog2 = makeEl({ bg: "rgba(246, 247, 252, 0.72)", w: 800, h: 600 });
 const overlay2 = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position: "fixed", children: [dialog2] });
 const sidebar2 = makeEl({ bg: "rgba(245, 247, 253, 0.24)", w: 280, h: 900, children: [overlay2] });
@@ -224,7 +232,35 @@ const shell2 = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [side
 sandbox.document.body = shell2;
 const scanner3 = createSurfaceScanner();
 scanner3.add(shell2);
-check("idle scan alone un-glasses the fixed element's ancestor", sidebar2.hasAttribute(SURFACE_ATTR), false);
+check("idle scan leaves the fixed element's sheet ancestor marked", sidebar2.hasAttribute(SHEET_ATTR), true);
+
+/* ── regression: suspension now only strips real glass, and restores it
+   exactly. A fixed element inside a glass *overlay* (the only ancestor that
+   can re-anchor it) suspends that overlay; when the element unmounts, the
+   overlay gets its exact marker value back — no re-walk, no state drift. */
+
+const bubble = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 60, h: 20, position: "fixed" });
+const menu = makeEl({ bg: "rgba(255, 255, 255, 0.8)", w: 400, h: 300, position: "absolute" });
+const menuShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [menu] });
+sandbox.document.body = menuShell;
+const scanner8 = createSurfaceScanner();
+scanner8.add(menuShell);
+check("overlay is glass before the fixed child is seen", menu.getAttribute(SURFACE_ATTR), "lg");
+
+// the fixed child mounts inside the overlay
+menu.children.push(bubble);
+bubble.parentElement = menu;
+scanner8.repairFixed(bubble);
+check("fixed child suspends the overlay's glass", menu.hasAttribute(SURFACE_ATTR), false);
+
+// while suspended, a rescan must not put it back
+scanner8.retag();
+check("suspended overlay stays un-glassed while the child is mounted", menu.hasAttribute(SURFACE_ATTR), false);
+
+menu.children.length = 0;
+bubble.isConnected = false;
+scanner8.checkReleases();
+check("overlay regains its exact marker once the child unmounts", menu.getAttribute(SURFACE_ATTR), "lg");
 
 /* ── nested fills are tinted, not stacked ─────────────────────────────
    A fill designed for an opaque plate only tints it. Over glass it tints AND

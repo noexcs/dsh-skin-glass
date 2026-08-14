@@ -25,6 +25,20 @@ const DEFAULT_TRANSLUCENCY = 0.45;
    the product renders through `createPortal(…, document.body)`, which are
    siblings of #root and could never inherit a blur applied inside it.
 
+   Surfaces come in two kinds (see tagSurface):
+   - overlays — position fixed/absolute: menus, dialogs, portalled popovers —
+     sit over *app content* and take the backdrop-filter directly;
+   - in-flow sheets — columns, cards, rows — only ever show the wallpaper, so
+     their frost lives on a `::before` pseudo (see GLASS_CSS). A filter on a
+     pseudo leaves the sheet itself a plain containing block, which is what
+     fixes the hover bug: the product's Tooltip bubble is a `position: fixed`
+     span rendered *inline*, and a backdrop-filter on any real ancestor makes
+     that ancestor the bubble's containing block — so every hover used to
+     strip the glass from the whole column. The painted result is unchanged,
+     and the sheet marker still feeds the nested-fill normalization
+     (merge/tint), which is what keeps the trajectory view from compounding
+     to opaque.
+
    The scrim flattens the wallpaper's luminance under everything, which is
    what lets the see-through tier open up without costing text contrast. It
    arrives as a theme token, so it follows the light/dark switch on its own.
@@ -68,10 +82,20 @@ const GLASS_CSS = [
   "background-image:linear-gradient(var(--dsh-glass-scrim, transparent), var(--dsh-glass-scrim, transparent)), var(--dsh-glass-image, none);",
   "background-size:cover;background-position:center;background-repeat:no-repeat;",
   "filter:blur(var(--dsh-glass-blur, 18px)) saturate(1.2)}",
-  // every surface the detector tags gets its own backdrop: this is what makes
-  // a panel show the *app content* behind it instead of only tinting the
-  // wallpaper, and it is the difference between "tinted rectangles" and glass
+  // out-of-flow overlays sit over *app content*: their own backdrop is what
+  // makes a dialog show the content behind it instead of only tinting the
+  // wallpaper
   "html[data-dsh-glass] [data-dsh-glass-surface]{",
+  "-webkit-backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);",
+  "backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}",
+  // in-flow sheets (columns, cards, rows) frost the wallpaper through a
+  // ::before pseudo: visually identical to a filter on the sheet itself, but
+  // the sheet never becomes the containing block for the inline-rendered
+  // `position: fixed` tooltip bubbles inside it (the hover-vanishing bug).
+  // `position: relative` anchors the pseudo's inset:0 to the sheet — it only
+  // affects *absolute* descendants, never fixed ones.
+  "html[data-dsh-glass] [data-dsh-glass-sheet]{position:relative}",
+  "html[data-dsh-glass] [data-dsh-glass-sheet]::before{content:'';position:absolute;inset:0;z-index:-1;pointer-events:none;border-radius:inherit;",
   "-webkit-backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);",
   "backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}",
   // descendants repainting their surface's own colour: harmless when that
@@ -79,13 +103,18 @@ const GLASS_CSS = [
   // (see MERGE_ATTR)
   "html[data-dsh-glass] [data-dsh-glass-merge]{background-color:transparent}",
   // refraction, Chromium only — the detector withholds the "lg" value entirely
-  // when the engine cannot do it, so this rule simply never matches elsewhere
+  // when the engine cannot do it, so these rules simply never match elsewhere
   "html[data-dsh-glass] [data-dsh-glass-surface=lg]{",
+  `-webkit-backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);`,
+  `backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}`,
+  "html[data-dsh-glass] [data-dsh-glass-sheet=lg]::before{",
   `-webkit-backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);`,
   `backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}`,
   // honour the OS "reduce transparency" setting (translucency is also forced
   // to its most legible end from JS, which can reach the token layer)
-  "@media (prefers-reduced-transparency: reduce){html[data-dsh-glass] [data-dsh-glass-surface]{",
+  "@media (prefers-reduced-transparency: reduce){",
+  "html[data-dsh-glass] [data-dsh-glass-surface],",
+  "html[data-dsh-glass] [data-dsh-glass-sheet]::before{",
   "-webkit-backdrop-filter:none;backdrop-filter:none}}"
 ].join("\n");
 
@@ -121,12 +150,28 @@ function ensureFilterHost() {
    So the question is asked of the rendered result instead: an element whose
    *computed* background-color is translucent is a glass surface, whichever
    class it happens to carry this build. Tagging stops at the first match so
-   only the outermost surface gets a backdrop-filter — nesting them would
+   only the outermost surface is marked — nesting backdrop-filters would
    compound the blur into mud and multiply the cost — but descent continues,
    because a fixed-position overlay nested inside glass is exactly what has
-   to be found (see unglassAncestors). */
+   to be found (see unglassAncestors).
+
+   The marker comes in two kinds (see tagSurface): overlays (fixed/absolute)
+   get `data-dsh-glass-surface`, which carries the backdrop-filter directly;
+   in-flow sheets get `data-dsh-glass-sheet`, whose frost lives on a `::before`
+   pseudo instead — the sheet itself never becomes a containing block, so a
+   hover tooltip (an inline-rendered `position: fixed` bubble) is neither
+   re-anchored nor triggers any glass stripping on mount. Both markers feed
+   the nested-fill normalization (merge/tint). */
 
 const SURFACE_ATTR = "data-dsh-glass-surface";
+/**
+ * Marks an *in-flow* surface (columns, cards, rows). Its frost lives on a
+ * `::before` pseudo (see GLASS_CSS), so the sheet itself never becomes the
+ * containing block for the inline-rendered `position: fixed` tooltip bubbles
+ * inside it — hovering a button used to strip the glass from the whole
+ * column. The marker still counts as glass for the merge/tint normalization.
+ */
+const SHEET_ATTR = "data-dsh-glass-sheet";
 /**
  * Marks a descendant that repaints its surface's own colour. The trajectory
  * panel is the clearest case: `details` is `bg-layer-1`, and `split`,
@@ -194,7 +239,11 @@ function scaleNestedTint(el, bg, scale) {
   return bg;
 }
 
-/** Walk up looking for an already-tagged surface — attributes only, no style. */
+/**
+ * Walk up looking for an ancestor carrying a real backdrop-filter
+ * (`data-dsh-glass-surface` only — sheets have no filter and cannot
+ * re-anchor fixed descendants). Attributes only, no style.
+ */
 function hasGlassAncestor(el) {
   let p = el.parentElement;
   while (p !== null) {
@@ -206,27 +255,25 @@ function hasGlassAncestor(el) {
 
 /**
  * `backdrop-filter` makes an element the containing block for its
- * `position: fixed` descendants. The product renders full-viewport overlays
- * inline rather than through a portal — the settings dialog is a
- * `position: fixed; inset: 0` div inside the sidebar — so glass on an
- * ancestor collapses `inset: 0` from the viewport down to that ancestor's
- * box, and the dialog ends up the width of the sidebar.
+ * `position: fixed` descendants, so a fixed descendant of a glass *overlay*
+ * must be freed from it. (In-flow sheets carry no filter, so the product's
+ * settings dialog — a fixed `inset: 0` div inside the sidebar — needs no
+ * handling any more: its ancestors are sheets and the viewport reference is
+ * intact.)
  *
- * Glass is therefore *suspended* on those ancestors, never revoked: the
- * conflict lasts only as long as the overlay is mounted, and revoking
- * permanently is plainly visible — the sidebar would stay flat for the rest
- * of the session after you close settings once. {@link createSurfaceScanner}
- * restores them when the overlay goes away.
- *
- * @returns the ancestors that lost their glass, nearest first.
+ * Stripping is a snapshot, not a re-walk: each ancestor's exact marker
+ * value rides along and the release path restores it verbatim. The old
+ * re-walk tagged elements that had never been tagged before (state drift
+ * across hover cycles).
+ * @returns the stripped ancestors as { ancestor, value }, nearest first.
  */
 function unglassAncestors(el) {
   const stripped = [];
   let p = el.parentElement;
   while (p !== null) {
     if (p.hasAttribute(SURFACE_ATTR)) {
+      stripped.push({ ancestor: p, value: p.getAttribute(SURFACE_ATTR) });
       p.removeAttribute(SURFACE_ATTR);
-      stripped.push(p);
     }
     p = p.parentElement;
   }
@@ -249,11 +296,19 @@ function tagSurface(el, suspended, computed) {
   if (rect.width < SURFACE_MIN_W || rect.height < SURFACE_MIN_H) return false;
   // A surface that fills the viewport has nothing behind it but the wallpaper,
   // which is already blurred — it would pay the largest backdrop cost in the
-  // app for no visible gain, and would become the containing block for the
-  // fixed-position overlays inside it. Skip it, but keep descending.
+  // app for no visible gain. Skip it, but keep descending.
   if (rect.width >= innerWidth * 0.92 && rect.height >= innerHeight * 0.92) return false;
   const large = rect.width * rect.height >= REFRACT_MIN_AREA;
-  el.setAttribute(SURFACE_ATTR, large && REFRACT_OK ? "lg" : "sm");
+  const tier = large && REFRACT_OK ? "lg" : "sm";
+  // Out-of-flow overlays sit over app content and take the filter directly;
+  // in-flow sheets only ever show the wallpaper, so their frost rides a
+  // ::before pseudo and the sheet stays a plain containing block — the
+  // inline-rendered fixed tooltip bubbles inside it are never re-anchored.
+  if (cs.position === "fixed" || cs.position === "absolute") {
+    el.setAttribute(SURFACE_ATTR, tier);
+  } else {
+    el.setAttribute(SHEET_ATTR, tier);
+  }
   return true;
 }
 
@@ -270,8 +325,10 @@ function createSurfaceScanner() {
   /** Current nested-fill alpha scale; see glassColor.nestedTintScale. */
   let tintScale = 1;
   /**
-   * Glass put on hold while a fixed-position overlay is mounted inside it:
-   * { fixed, ancestor } pairs plus a Set of the ancestors for O(1) lookup.
+   * Glass put on hold while a fixed-position element is mounted inside a
+   * glass *overlay*: { fixed, stripped } records (each stripped entry holds
+   * the ancestor's exact marker value) plus a Set of the ancestors for O(1)
+   * lookup. In-flow sheets carry no filter and are never suspended.
    */
   let suspensions = [];
   let suspended = new Set();
@@ -279,17 +336,15 @@ function createSurfaceScanner() {
   /** Suspend glass on every glass ancestor of a newly seen fixed element. */
   const suspend = (fixedEl) => {
     const stripped = unglassAncestors(fixedEl);
-    for (const ancestor of stripped) {
-      suspensions.push({ fixed: fixedEl, ancestor });
-      suspended.add(ancestor);
-    }
-    return stripped.length > 0 ? stripped[stripped.length - 1] : null;
+    if (stripped.length === 0) return;
+    suspensions.push({ fixed: fixedEl, stripped });
+    for (const { ancestor } of stripped) suspended.add(ancestor);
   };
 
   /**
-   * Release ancestors whose overlay has unmounted and queue them for
-   * re-tagging. Without this, closing the settings dialog would leave the
-   * sidebar flat for the rest of the session.
+   * Release ancestors whose overlay has unmounted: each ancestor gets its
+   * exact marker value back from the suspension snapshot, then a normal
+   * re-scan normalizes nested fills added while it was suspended.
    */
   const sweepSuspensions = () => {
     if (suspensions.length === 0) return;
@@ -299,15 +354,21 @@ function createSurfaceScanner() {
     for (const entry of suspensions) {
       if (entry.fixed.isConnected) {
         kept.push(entry);
-        stillHeld.add(entry.ancestor);
+        for (const { ancestor } of entry.stripped) stillHeld.add(ancestor);
       } else {
         dropped = true;
       }
     }
     if (!dropped) return;
     const released = [];
-    for (const ancestor of suspended) {
-      if (!stillHeld.has(ancestor) && ancestor.isConnected) released.push(ancestor);
+    for (const entry of suspensions) {
+      if (entry.fixed.isConnected) continue;
+      for (const { ancestor, value } of entry.stripped) {
+        if (!stillHeld.has(ancestor) && ancestor.isConnected) {
+          ancestor.setAttribute(SURFACE_ATTR, value);
+          released.push(ancestor);
+        }
+      }
     }
     suspensions = kept;
     suspended = stillHeld;
@@ -328,12 +389,10 @@ function createSurfaceScanner() {
       if (!el.isConnected) continue;
       const cs = getComputedStyle(el);
       if (cs.position === "fixed" && !suspended.has(el)) {
-        const freed = suspend(el);
-        // that subtree was skipped while it counted as glass — re-walk it
-        if (freed !== null) {
-          for (const stale of freed.querySelectorAll(`[${MERGE_ATTR}]`)) stale.removeAttribute(MERGE_ATTR);
-          push(freed, false, null);
-        }
+        // only glass *overlays* (data-dsh-glass-surface) carry a filter, so
+        // this only ever fires for fixed elements inside them; the release
+        // path restores the snapshot verbatim
+        suspend(el);
       }
       // Descent continues past a glass surface even though tagging stops:
       // pruning would be cheaper, but a fixed-position overlay nested inside
@@ -366,8 +425,9 @@ function createSurfaceScanner() {
   };
 
   const stripTags = () => {
-    for (const el of document.querySelectorAll(`[${SURFACE_ATTR}], [${MERGE_ATTR}], [${TINT_ATTR}]`)) {
+    for (const el of document.querySelectorAll(`[${SURFACE_ATTR}], [${SHEET_ATTR}], [${MERGE_ATTR}], [${TINT_ATTR}]`)) {
       el.removeAttribute(SURFACE_ATTR);
+      el.removeAttribute(SHEET_ATTR);
       el.removeAttribute(MERGE_ATTR);
       if (el.hasAttribute(TINT_ATTR)) {
         el.removeAttribute(TINT_ATTR);
@@ -379,8 +439,8 @@ function createSurfaceScanner() {
   return {
     /**
      * Something left the DOM. Closing a dialog produces only removals, which
-     * queue no work, so the sweep that gives the sidebar its glass back needs
-     * its own nudge.
+     * queue no work, so the sweep that gives a suspended overlay its glass
+     * back needs its own nudge.
      */
     checkReleases() {
       if (stopped || suspensions.length === 0) return;
@@ -399,21 +459,17 @@ function createSurfaceScanner() {
     /**
      * Repair a freshly mounted subtree synchronously. The idle pass would get
      * here eventually, but a modal that renders at the wrong size for even one
-     * frame is exactly the bug this guards against, so overlays are checked
-     * the moment they mount. The cheap attribute walk runs first, so the
-     * getComputedStyle cost is only paid inside glass.
+     * frame is exactly the bug this guards against, so fixed elements are
+     * checked the moment they mount. The cheap attribute walk runs first, so
+     * the getComputedStyle cost is only paid inside a glass overlay — which
+     * is the only place a filter can re-anchor a fixed descendant.
      */
     repairFixed(node) {
       if (stopped || node.nodeType !== 1 || !hasGlassAncestor(node)) return;
       const candidates = [node, ...node.children];
       for (const el of candidates) {
         if (getComputedStyle(el).position !== "fixed") continue;
-        const freed = suspend(el);
-        if (freed !== null) {
-          for (const stale of freed.querySelectorAll(`[${MERGE_ATTR}]`)) stale.removeAttribute(MERGE_ATTR);
-          push(freed, false, null);
-          schedule();
-        }
+        suspend(el);
         return;
       }
     },

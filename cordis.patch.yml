@@ -1,0 +1,5 @@
+# dsh-skin-glass bundle layer: mounts the skin plugin row.
+# Applied when the profile lists this package in dsh.profile.bundles.
+- insert:
+    - id: dsh-skin-glass
+      name: dsh-skin-glass

@@ -55,35 +55,35 @@ if [ "$NO_RESTART" = "1" ]; then
   exit 0
 fi
 
-# ── 4) 若 dsh web 正在运行，自动重启使其生效 ─────────────────────────
-WEB_PID="$(lsof -tiTCP:"$DSH_WEB_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
-if [ -z "$WEB_PID" ]; then
-  say "dsh web 未在运行：启动 dsh web（或 npx @deepseek-ai/dsh web）后刷新页面即可。"
-  exit 0
-fi
-if ! ps -p "$WEB_PID" -o command= 2>/dev/null | grep -q "dsh"; then
-  say "端口 $DSH_WEB_PORT 被其他进程占用，跳过自动重启，请手动重启 dsh web。"
-  exit 0
-fi
+# # ── 4) 若 dsh web 正在运行，自动重启使其生效 ─────────────────────────
+# WEB_PID="$(lsof -tiTCP:"$DSH_WEB_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+# if [ -z "$WEB_PID" ]; then
+#   say "dsh web 未在运行：启动 dsh web（或 npx @deepseek-ai/dsh web）后刷新页面即可。"
+#   exit 0
+# fi
+# if ! ps -p "$WEB_PID" -o command= 2>/dev/null | grep -q "dsh"; then
+#   say "端口 $DSH_WEB_PORT 被其他进程占用，跳过自动重启，请手动重启 dsh web。"
+#   exit 0
+# fi
 
-say "重启 dsh web（pid ${WEB_PID}）…"
-SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-nohup bash "$SELF/restart-web.sh" "$WEB_PID" /tmp/dsh-web-restart.log >/dev/null 2>&1 &
-disown 2>/dev/null || true
+# say "重启 dsh web（pid ${WEB_PID}）…"
+# SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# nohup bash "$SELF/restart-web.sh" "$WEB_PID" /tmp/dsh-web-restart.log >/dev/null 2>&1 &
+# disown 2>/dev/null || true
 
-# 等旧进程退出，避免误读旧服务的响应
-for i in $(seq 1 60); do
-  kill -0 "$WEB_PID" 2>/dev/null || break
-  sleep 0.5
-done
+# # 等旧进程退出，避免误读旧服务的响应
+# for i in $(seq 1 60); do
+#   kill -0 "$WEB_PID" 2>/dev/null || break
+#   sleep 0.5
+# done
 
-# ── 5) 轮询新服务：boot manifest 出现插件条目即就绪 ──────────────────
-say "等待新服务就绪…"
-for i in $(seq 1 60); do
-  if curl -sf "http://127.0.0.1:$DSH_WEB_PORT/" 2>/dev/null | grep -q "dsh-skin-glass"; then
-    say "完成！刷新浏览器页面，在 设置 → 通用 中选择背景图即可。"
-    exit 0
-  fi
-  sleep 1
-done
-die "新服务未在 60 秒内就绪，请查看 /tmp/dsh-web-restart.log"
+# # ── 5) 轮询新服务：boot manifest 出现插件条目即就绪 ──────────────────
+# say "等待新服务就绪…"
+# for i in $(seq 1 60); do
+#   if curl -sf "http://127.0.0.1:$DSH_WEB_PORT/" 2>/dev/null | grep -q "dsh-skin-glass"; then
+#     say "完成！刷新浏览器页面，在 设置 → 通用 中选择背景图即可。"
+#     exit 0
+#   fi
+#   sleep 1
+# done
+# die "新服务未在 60 秒内就绪，请查看 /tmp/dsh-web-restart.log"

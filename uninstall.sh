@@ -43,7 +43,7 @@ if ! ps -p "$WEB_PID" -o command= 2>/dev/null | grep -q "dsh"; then
   exit 0
 fi
 
-say "重启 dsh web（pid $WEB_PID）…"
+say "重启 dsh web（pid ${WEB_PID}）…"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 nohup bash "$SELF/restart-web.sh" "$WEB_PID" /tmp/dsh-web-restart.log >/dev/null 2>&1 &
 disown 2>/dev/null || true

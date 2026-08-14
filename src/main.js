@@ -12,17 +12,81 @@ const GLASS_NS = "dsh-skin-glass";
 const MAX_DIM = 1920;
 const SAMPLE_DIM = 64;
 
-/* ── chrome stylesheet: image layer + frosted blur ────────────────── */
+/** Defaults for the persisted state; also the fallbacks for partial records. */
+const DEFAULT_BLUR = 18;
+const DEFAULT_TRANSLUCENCY = 0.45;
+
+/* ── chrome stylesheet: image layer + scrim ───────────────────────────
+   The blur lives on the wallpaper layer, not on a backdrop-filter over the
+   app root: #root's backdrop *is* only the wallpaper (body is transparent,
+   body::before sits at z-index -1), so blurring the image directly is
+   visually equivalent, costs one static filter instead of a full-viewport
+   recompute per frame, and — the reason it matters — also covers the popovers
+   the product renders through `createPortal(…, document.body)`, which are
+   siblings of #root and could never inherit a blur applied inside it.
+
+   The scrim flattens the wallpaper's luminance under everything, which is
+   what lets the see-through tier open up without costing text contrast. It
+   arrives as a theme token, so it follows the light/dark switch on its own.
+   Depth behind modals is restored through --dsw-mask-blur, which the
+   product's own `.mask` elements already consume.
+
+   Everything is gated on html[data-dsh-glass] so that with no background
+   image the skin contributes nothing at all. */
+
+/**
+ * Refraction filter. Chromium is the only engine that accepts `url(#…)` in
+ * `backdrop-filter` — Safari and Firefox restrict it to the built-in filter
+ * functions so they can keep the effect on the GPU — so this is strictly a
+ * progressive enhancement, feature-detected at {@link REFRACT_OK}.
+ *
+ * A turbulence-driven displacement (rather than the edge-concentrated map a
+ * hand-tuned "liquid glass" component would use) is what works here: the map
+ * has to be independent of element size, because it is applied to whatever
+ * surfaces the detector happens to find.
+ */
+const REFRACT_ID = "dsh-glass-refract";
+const FILTER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0">` +
+  `<filter id="${REFRACT_ID}" x="-15%" y="-15%" width="130%" height="130%" color-interpolation-filters="sRGB">` +
+  `<feTurbulence type="fractalNoise" baseFrequency="0.006 0.010" numOctaves="2" seed="11" result="warp"/>` +
+  `<feGaussianBlur in="warp" stdDeviation="6" result="softWarp"/>` +
+  `<feDisplacementMap in="SourceGraphic" in2="softWarp" scale="18" xChannelSelector="R" yChannelSelector="G"/>` +
+  `</filter></svg>`;
+
+const REFRACT_OK = typeof CSS !== "undefined" && typeof CSS.supports === "function" &&
+  CSS.supports("backdrop-filter", `url(#${REFRACT_ID})`);
 
 const GLASS_TAG_ID = "dsh-skin-glass/chrome.css";
 const GLASS_CSS = [
   "/* dsh-skin-glass: background layer + frosted surfaces */",
-  "html{background:#0b0e17}",
-  "body{background:transparent !important}",
-  "body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;",
-  "background-image:var(--dsh-glass-image,none);background-size:cover;background-position:center;background-repeat:no-repeat;",
-  "filter:blur(2px) saturate(1.15)}",
-  "#root > div{backdrop-filter:blur(var(--dsh-glass-blur,18px)) saturate(1.35)}"
+  "html[data-dsh-glass]{background:#0b0e17}",
+  "html[data-dsh-glass] body{background:transparent !important}",
+  "html[data-dsh-glass] body::before{content:'';position:fixed;z-index:-1;pointer-events:none;",
+  // grow the layer past the viewport so the blur cannot pull transparent
+  // pixels in at the edges and leave a dark vignette
+  "inset:calc(-2 * var(--dsh-glass-blur, 18px));",
+  "background-image:linear-gradient(var(--dsh-glass-scrim, transparent), var(--dsh-glass-scrim, transparent)), var(--dsh-glass-image, none);",
+  "background-size:cover;background-position:center;background-repeat:no-repeat;",
+  "filter:blur(var(--dsh-glass-blur, 18px)) saturate(1.2)}",
+  // every surface the detector tags gets its own backdrop: this is what makes
+  // a panel show the *app content* behind it instead of only tinting the
+  // wallpaper, and it is the difference between "tinted rectangles" and glass
+  "html[data-dsh-glass] [data-dsh-glass-surface]{",
+  "-webkit-backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);",
+  "backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}",
+  // descendants repainting their surface's own colour: harmless when that
+  // colour is opaque, but with translucency they compound into a solid block
+  // (see MERGE_ATTR)
+  "html[data-dsh-glass] [data-dsh-glass-merge]{background-color:transparent}",
+  // refraction, Chromium only — the detector withholds the "lg" value entirely
+  // when the engine cannot do it, so this rule simply never matches elsewhere
+  "html[data-dsh-glass] [data-dsh-glass-surface=lg]{",
+  `-webkit-backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);`,
+  `backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}`,
+  // honour the OS "reduce transparency" setting (translucency is also forced
+  // to its most legible end from JS, which can reach the token layer)
+  "@media (prefers-reduced-transparency: reduce){html[data-dsh-glass] [data-dsh-glass-surface]{",
+  "-webkit-backdrop-filter:none;backdrop-filter:none}}"
 ].join("\n");
 
 function ensureChromeTag() {
@@ -33,6 +97,347 @@ function ensureChromeTag() {
   tag.dataset.pluginCss = GLASS_TAG_ID;
   tag.textContent = GLASS_CSS;
   document.head.appendChild(tag);
+}
+
+/** Host for the refraction filter; kept out of layout and out of the a11y tree. */
+function ensureFilterHost() {
+  if (!REFRACT_OK || document.getElementById("dsh-glass-filters") !== null) return;
+  const host = document.createElement("div");
+  host.id = "dsh-glass-filters";
+  host.setAttribute("aria-hidden", "true");
+  host.style.cssText = "position:fixed;width:0;height:0;overflow:hidden;pointer-events:none";
+  host.innerHTML = FILTER_SVG;
+  document.body.appendChild(host);
+}
+
+/* ── glass surface detection ──────────────────────────────────────────
+   Which elements are glass cannot be answered with a selector list. The
+   product's class names are content-hashed per build (`VOzbGW_panel`,
+   `_wrap_1ao1y_1`), and a scan of its stylesheets turns up ~80 names for the
+   surface tokens — most of them generic (`root`, `row`, `body`, `header`,
+   `card`), so substring selectors would both over-match and stack nested
+   backdrop-filters.
+
+   So the question is asked of the rendered result instead: an element whose
+   *computed* background-color is translucent is a glass surface, whichever
+   class it happens to carry this build. Tagging stops at the first match so
+   only the outermost surface gets a backdrop-filter — nesting them would
+   compound the blur into mud and multiply the cost — but descent continues,
+   because a fixed-position overlay nested inside glass is exactly what has
+   to be found (see unglassAncestors). */
+
+const SURFACE_ATTR = "data-dsh-glass-surface";
+/**
+ * Marks a descendant that repaints its surface's own colour. The trajectory
+ * panel is the clearest case: `details` is `bg-layer-1`, and `split`,
+ * `table`, `assistantOutput`, `schema`, `overviewHeading` and `promptDiff`
+ * inside it are `bg-layer-1` again. Painting a colour over itself is a no-op
+ * while that colour is opaque — which is why the product can write it freely
+ * — but once the token is translucent each repeat compounds: four layers at
+ * α 0.81 composite to 99.9% opaque, and the panel stops being glass.
+ *
+ * Zeroing those repeats restores what the opaque theme already looked like.
+ * Only an *exact* colour match qualifies; a genuinely different surface
+ * nested inside (a code block in a panel) was visible before and stays.
+ */
+const MERGE_ATTR = "data-dsh-glass-merge";
+/**
+ * Marks a descendant whose background alpha the skin has scaled down, and
+ * holds its original computed colour so a rescan compares against the real
+ * value instead of the already-scaled one (and cannot scale it twice).
+ */
+const TINT_ATTR = "data-dsh-glass-tint";
+/** Below this the fill is a hover tint, not a surface; above it, it is opaque. */
+const SURFACE_MIN_ALPHA = 0.2;
+const SURFACE_MAX_ALPHA = 0.995;
+const SURFACE_MIN_W = 44;
+const SURFACE_MIN_H = 24;
+/** Refraction is reserved for surfaces big enough for the distortion to read. */
+const REFRACT_MIN_AREA = 45000;
+/** Elements processed per idle slice, so a long conversation cannot stall. */
+const SCAN_BUDGET = 2500;
+
+function alphaOf(color) {
+  const m = /^rgba?\(([^)]+)\)$/.exec(color);
+  if (m === null) return 1;
+  const parts = m[1].split(",");
+  return parts.length > 3 ? Number(parts[3]) : 1;
+}
+
+/** Split "rgba(r, g, b, a)" into numbers, or null if it is not that shape. */
+function parseColor(color) {
+  const m = /^rgba?\(([^)]+)\)$/.exec(color);
+  if (m === null) return null;
+  const parts = m[1].split(",").map((s) => Number(s.trim()));
+  if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n))) return null;
+  return { rgb: parts.slice(0, 3), a: parts.length > 3 ? parts[3] : 1 };
+}
+
+/**
+ * Repaint a nested fill at a fraction of its alpha, so it tints the glass
+ * instead of thickening it. Written as an inline style because the value is
+ * per-element; the original colour rides along in the attribute so the next
+ * pass can tell "already scaled" from "needs scaling".
+ * @returns the element's original background colour.
+ */
+function scaleNestedTint(el, bg, scale) {
+  const original = el.getAttribute(TINT_ATTR);
+  if (original !== null) return original;      // already ours; never compound
+  if (scale >= 1) return bg;
+  // a background the product set inline is not ours to rewrite
+  if (el.style.backgroundColor !== "") return bg;
+  const parsed = parseColor(bg);
+  if (parsed === null || parsed.a <= 0 || parsed.a >= 1) return bg;
+  el.setAttribute(TINT_ATTR, bg);
+  const scaled = Math.round(parsed.a * scale * 1000) / 1000;
+  el.style.setProperty("background-color", `rgba(${parsed.rgb.join(", ")}, ${scaled})`);
+  return bg;
+}
+
+/** Walk up looking for an already-tagged surface — attributes only, no style. */
+function hasGlassAncestor(el) {
+  let p = el.parentElement;
+  while (p !== null) {
+    if (p.hasAttribute(SURFACE_ATTR)) return true;
+    p = p.parentElement;
+  }
+  return false;
+}
+
+/**
+ * `backdrop-filter` makes an element the containing block for its
+ * `position: fixed` descendants. The product renders full-viewport overlays
+ * inline rather than through a portal — the settings dialog is a
+ * `position: fixed; inset: 0` div inside the sidebar — so glass on an
+ * ancestor collapses `inset: 0` from the viewport down to that ancestor's
+ * box, and the dialog ends up the width of the sidebar.
+ *
+ * Glass is therefore *suspended* on those ancestors, never revoked: the
+ * conflict lasts only as long as the overlay is mounted, and revoking
+ * permanently is plainly visible — the sidebar would stay flat for the rest
+ * of the session after you close settings once. {@link createSurfaceScanner}
+ * restores them when the overlay goes away.
+ *
+ * @returns the ancestors that lost their glass, nearest first.
+ */
+function unglassAncestors(el) {
+  const stripped = [];
+  let p = el.parentElement;
+  while (p !== null) {
+    if (p.hasAttribute(SURFACE_ATTR)) {
+      p.removeAttribute(SURFACE_ATTR);
+      stripped.push(p);
+    }
+    p = p.parentElement;
+  }
+  return stripped;
+}
+
+/**
+ * Tag one element if it is a glass surface.
+ * @param suspended - elements currently holding a fixed-position overlay,
+ *   for which glass is on hold (see {@link unglassAncestors}).
+ * @param computed - reuse of the caller's getComputedStyle, when it has one.
+ * @returns true when tagged, which tells the caller to stop descending.
+ */
+function tagSurface(el, suspended, computed) {
+  if (suspended !== undefined && suspended.has(el)) return false;
+  const cs = computed !== undefined ? computed : getComputedStyle(el);
+  const alpha = alphaOf(cs.backgroundColor);
+  if (!(alpha >= SURFACE_MIN_ALPHA && alpha <= SURFACE_MAX_ALPHA)) return false;
+  const rect = el.getBoundingClientRect();
+  if (rect.width < SURFACE_MIN_W || rect.height < SURFACE_MIN_H) return false;
+  // A surface that fills the viewport has nothing behind it but the wallpaper,
+  // which is already blurred — it would pay the largest backdrop cost in the
+  // app for no visible gain, and would become the containing block for the
+  // fixed-position overlays inside it. Skip it, but keep descending.
+  if (rect.width >= innerWidth * 0.92 && rect.height >= innerHeight * 0.92) return false;
+  const large = rect.width * rect.height >= REFRACT_MIN_AREA;
+  el.setAttribute(SURFACE_ATTR, large && REFRACT_OK ? "lg" : "sm");
+  return true;
+}
+
+/** Incremental, idle-scheduled scanner over a queue of subtree roots. */
+function createSurfaceScanner() {
+  /**
+   * Entries are { el, inGlass, surfaceColor }: `inGlass` suppresses tagging
+   * (not descent), `surfaceColor` is the nearest painted background above,
+   * against which repeats are detected.
+   */
+  let queue = [];
+  let scheduled = false;
+  let stopped = false;
+  /** Current nested-fill alpha scale; see glassColor.nestedTintScale. */
+  let tintScale = 1;
+  /**
+   * Glass put on hold while a fixed-position overlay is mounted inside it:
+   * { fixed, ancestor } pairs plus a Set of the ancestors for O(1) lookup.
+   */
+  let suspensions = [];
+  let suspended = new Set();
+
+  /** Suspend glass on every glass ancestor of a newly seen fixed element. */
+  const suspend = (fixedEl) => {
+    const stripped = unglassAncestors(fixedEl);
+    for (const ancestor of stripped) {
+      suspensions.push({ fixed: fixedEl, ancestor });
+      suspended.add(ancestor);
+    }
+    return stripped.length > 0 ? stripped[stripped.length - 1] : null;
+  };
+
+  /**
+   * Release ancestors whose overlay has unmounted and queue them for
+   * re-tagging. Without this, closing the settings dialog would leave the
+   * sidebar flat for the rest of the session.
+   */
+  const sweepSuspensions = () => {
+    if (suspensions.length === 0) return;
+    const kept = [];
+    const stillHeld = new Set();
+    let dropped = false;
+    for (const entry of suspensions) {
+      if (entry.fixed.isConnected) {
+        kept.push(entry);
+        stillHeld.add(entry.ancestor);
+      } else {
+        dropped = true;
+      }
+    }
+    if (!dropped) return;
+    const released = [];
+    for (const ancestor of suspended) {
+      if (!stillHeld.has(ancestor) && ancestor.isConnected) released.push(ancestor);
+    }
+    suspensions = kept;
+    suspended = stillHeld;
+    for (const ancestor of released) push(ancestor, false, null);
+    if (released.length > 0) schedule();
+  };
+
+  const push = (el, inGlass, surfaceColor) => queue.push({ el, inGlass, surfaceColor });
+
+  const drain = () => {
+    scheduled = false;
+    if (stopped) return;
+    sweepSuspensions();
+    let budget = SCAN_BUDGET;
+    while (queue.length > 0 && budget > 0) {
+      const { el, inGlass, surfaceColor } = queue.pop();
+      budget -= 1;
+      if (!el.isConnected) continue;
+      const cs = getComputedStyle(el);
+      if (cs.position === "fixed" && !suspended.has(el)) {
+        const freed = suspend(el);
+        // that subtree was skipped while it counted as glass — re-walk it
+        if (freed !== null) {
+          for (const stale of freed.querySelectorAll(`[${MERGE_ATTR}]`)) stale.removeAttribute(MERGE_ATTR);
+          push(freed, false, null);
+        }
+      }
+      // Descent continues past a glass surface even though tagging stops:
+      // pruning would be cheaper, but a fixed-position overlay nested inside
+      // glass is exactly what has to be found, and pruning would hide it.
+      const tagged = !inGlass && tagSurface(el, suspended, cs);
+      // an element we already tinted reports its scaled colour, so recover the
+      // original for both the repeat test and what children compare against
+      const bg = el.getAttribute(TINT_ATTR) !== null ? el.getAttribute(TINT_ATTR) : cs.backgroundColor;
+      let childColor = surfaceColor;
+      if (tagged) {
+        childColor = bg;
+      } else if (inGlass && surfaceColor !== null && bg === surfaceColor) {
+        el.setAttribute(MERGE_ATTR, "");   // repeat of the surface's own colour
+      } else if (alphaOf(bg) > 0) {
+        // a new painted layer: tint it rather than let it add opacity, and
+        // make it the reference its own children compare against
+        if (inGlass) scaleNestedTint(el, bg, tintScale);
+        childColor = bg;
+      }
+      for (const child of el.children) push(child, inGlass || tagged, childColor);
+    }
+    if (queue.length > 0) schedule();
+  };
+
+  const schedule = () => {
+    if (scheduled || stopped) return;
+    scheduled = true;
+    if (typeof requestIdleCallback === "function") requestIdleCallback(drain, { timeout: 500 });
+    else setTimeout(drain, 60);
+  };
+
+  const stripTags = () => {
+    for (const el of document.querySelectorAll(`[${SURFACE_ATTR}], [${MERGE_ATTR}], [${TINT_ATTR}]`)) {
+      el.removeAttribute(SURFACE_ATTR);
+      el.removeAttribute(MERGE_ATTR);
+      if (el.hasAttribute(TINT_ATTR)) {
+        el.removeAttribute(TINT_ATTR);
+        el.style.removeProperty("background-color");
+      }
+    }
+  };
+
+  return {
+    /**
+     * Something left the DOM. Closing a dialog produces only removals, which
+     * queue no work, so the sweep that gives the sidebar its glass back needs
+     * its own nudge.
+     */
+    checkReleases() {
+      if (stopped || suspensions.length === 0) return;
+      schedule();
+    },
+    /** Set the nested-fill alpha scale; takes effect on the next retag. */
+    setTintScale(value) {
+      tintScale = value;
+    },
+    /** Queue a subtree for tagging. */
+    add(root) {
+      if (stopped || root.nodeType !== 1) return;
+      push(root, false, null);
+      schedule();
+    },
+    /**
+     * Repair a freshly mounted subtree synchronously. The idle pass would get
+     * here eventually, but a modal that renders at the wrong size for even one
+     * frame is exactly the bug this guards against, so overlays are checked
+     * the moment they mount. The cheap attribute walk runs first, so the
+     * getComputedStyle cost is only paid inside glass.
+     */
+    repairFixed(node) {
+      if (stopped || node.nodeType !== 1 || !hasGlassAncestor(node)) return;
+      const candidates = [node, ...node.children];
+      for (const el of candidates) {
+        if (getComputedStyle(el).position !== "fixed") continue;
+        const freed = suspend(el);
+        if (freed !== null) {
+          for (const stale of freed.querySelectorAll(`[${MERGE_ATTR}]`)) stale.removeAttribute(MERGE_ATTR);
+          push(freed, false, null);
+          schedule();
+        }
+        return;
+      }
+    },
+    /** Drop every tag and start over — token values (and so alphas) changed. */
+    retag() {
+      if (stopped) return;
+      stripTags();
+      queue = [];
+      push(document.body, false, null);
+      schedule();
+    },
+    /** Drop every tag and go idle, without retiring the scanner. */
+    clear() {
+      queue = [];
+      stripTags();
+    },
+    stop() {
+      stopped = true;
+      queue = [];
+      suspensions = [];
+      suspended = new Set();
+      stripTags();
+    }
+  };
 }
 
 /* ── image handling ───────────────────────────────────────────────── */
@@ -87,11 +492,19 @@ async function samplePixels(dataUrl) {
   return samples;
 }
 
-/** Extract the accent color from a (downscaled) background image. */
-async function extractAccent(dataUrl) {
+/**
+ * Read the background image once and derive everything the token layer needs
+ * from that single sample pass: the accent color and the brightness profile
+ * that sizes the scrim.
+ * @returns { accent: [r,g,b], wallpaper: { meanL, stdL } }
+ */
+async function analyzeImage(dataUrl) {
   const samples = await samplePixels(dataUrl);
   const clusters = glassColor.quantize(samples, 6, 10);
-  return glassColor.pickAccent(clusters);
+  return {
+    accent: glassColor.pickAccent(clusters),
+    wallpaper: glassColor.analyzeWallpaper(samples)
+  };
 }
 
 /* ── settings row dictionaries ────────────────────────────────────── */
@@ -100,8 +513,9 @@ const zh = {
   "glass.title": "背景图",
   "glass.choose": "选择图片",
   "glass.remove": "移除",
-  "glass.blur": "毛玻璃强度",
-  "glass.hint": "主题色自动取自背景图，组件呈毛玻璃效果",
+  "glass.blur": "背景模糊",
+  "glass.translucency": "通透度",
+  "glass.hint": "主题色自动取自背景图；通透度只放开聊天背景与侧边栏，弹窗、菜单、代码块等阅读区域保留可读下限",
   "glass.processing": "正在处理图片…",
   "glass.error.decode": "图片解码失败：请换一张图片（如 JPG/PNG/WebP）",
   "glass.error.write": "保存到浏览器存储失败（图片过大或隐私模式）"
@@ -110,8 +524,9 @@ const en = {
   "glass.title": "Background",
   "glass.choose": "Choose image",
   "glass.remove": "Remove",
-  "glass.blur": "Frosted blur",
-  "glass.hint": "Theme colors are extracted from the image; surfaces render frosted glass",
+  "glass.blur": "Background blur",
+  "glass.translucency": "Translucency",
+  "glass.hint": "Theme colors are extracted from the image; translucency only opens up the chat background and sidebar — dialogs, menus and code keep a legibility floor",
   "glass.processing": "Processing image…",
   "glass.error.decode": "Image decode failed: try another image (JPG/PNG/WebP)",
   "glass.error.write": "Failed to persist to browser storage (image too large or private mode)"
@@ -120,11 +535,12 @@ const en = {
 /* ── settings row store ───────────────────────────────────────────── */
 
 const createRowStore = () => defineStore({
-  init: () => ({ image: "", blur: 18, ready: false, status: "", error: "" }),
+  init: () => ({ image: "", blur: DEFAULT_BLUR, translucency: DEFAULT_TRANSLUCENCY, ready: false, status: "", error: "" }),
   actions: {
     sync: (d, value) => {
       d.image = value && typeof value.image === "string" ? value.image : "";
-      d.blur = value && typeof value.blur === "number" ? value.blur : 18;
+      d.blur = value && typeof value.blur === "number" ? value.blur : DEFAULT_BLUR;
+      d.translucency = value && typeof value.translucency === "number" ? value.translucency : DEFAULT_TRANSLUCENCY;
       d.ready = true;
     },
     status: (d, message) => {
@@ -158,12 +574,31 @@ const thumbStyle = {
   border: "1px solid var(--dsw-alias-border-l2)"
 };
 const hintStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 };
+const sliderLabelStyle = { fontSize: 13, minWidth: 64 };
+const readoutStyle = { fontSize: 12, minWidth: 36, textAlign: "right" };
 
 const errorStyle = { color: "var(--dsw-alias-state-error-primary)", fontSize: 12 };
 const statusStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 };
 
-function GlassRow({ t, useStore, chooseFile, clearImage, setBlur }) {
-  const { image, blur, status, error } = useStore((s) => s);
+/** One labelled slider line; both controls share this shape. */
+function sliderLine(label, value, max, step, readout, onInput) {
+  return React.createElement("div", { style: rowLine },
+    React.createElement("label", { style: sliderLabelStyle }, label),
+    React.createElement("input", {
+      type: "range",
+      min: 0,
+      max,
+      step,
+      value,
+      style: { flex: 1, minWidth: 120 },
+      onChange: (e) => onInput(Number(e.target.value))
+    }),
+    React.createElement("span", { style: readoutStyle }, readout)
+  );
+}
+
+function GlassRow({ t, useStore, chooseFile, clearImage, setBlur, setTranslucency }) {
+  const { image, blur, translucency, status, error } = useStore((s) => s);
   const fileRef = React.useRef(null);
   const onFile = (e) => {
     const file = e.target.files && e.target.files[0];
@@ -178,19 +613,8 @@ function GlassRow({ t, useStore, chooseFile, clearImage, setBlur }) {
       image ? React.createElement("button", { type: "button", style: btnStyle, onClick: clearImage }, t("glass.remove")) : null,
       React.createElement("input", { ref: fileRef, type: "file", accept: "image/*", style: { display: "none" }, onChange: onFile })
     ),
-    React.createElement("div", { style: rowLine },
-      React.createElement("label", { style: { fontSize: 13 } }, t("glass.blur")),
-      React.createElement("input", {
-        type: "range",
-        min: 0,
-        max: 48,
-        step: 1,
-        value: blur,
-        style: { flex: 1, minWidth: 120 },
-        onChange: (e) => setBlur(Number(e.target.value))
-      }),
-      React.createElement("span", { style: { fontSize: 12, minWidth: 30 } }, `${blur}px`)
-    ),
+    sliderLine(t("glass.blur"), blur, 48, 1, `${blur}px`, setBlur),
+    sliderLine(t("glass.translucency"), Math.round(translucency * 100), 100, 1, `${Math.round(translucency * 100)}%`, (v) => setTranslucency(v / 100)),
     status ? React.createElement("div", { style: statusStyle }, status) : null,
     error ? React.createElement("div", { style: errorStyle }, error) : null,
     React.createElement("div", { style: hintStyle }, t("glass.hint"))
@@ -203,17 +627,19 @@ function GlassRow({ t, useStore, chooseFile, clearImage, setBlur }) {
 
 const STORAGE_KEY = "dsh-skin-glass:v1";
 
+/** Per-field defaulting doubles as the migration for pre-translucency records. */
 function readStored() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { image: "", blur: 18 };
+    if (!raw) return { image: "", blur: DEFAULT_BLUR, translucency: DEFAULT_TRANSLUCENCY };
     const parsed = JSON.parse(raw);
     return {
       image: typeof parsed.image === "string" ? parsed.image : "",
-      blur: typeof parsed.blur === "number" ? parsed.blur : 18
+      blur: typeof parsed.blur === "number" ? parsed.blur : DEFAULT_BLUR,
+      translucency: typeof parsed.translucency === "number" ? parsed.translucency : DEFAULT_TRANSLUCENCY
     };
   } catch (_read) {
-    return { image: "", blur: 18 };
+    return { image: "", blur: DEFAULT_BLUR, translucency: DEFAULT_TRANSLUCENCY };
   }
 }
 
@@ -227,53 +653,101 @@ const inject = ["slots", "locale", "theme"];
 
 function apply(ctx) {
   ensureChromeTag();
+  ensureFilterHost();
 
   const store = createRowStore();
   let stored = readStored();
   let bound;
   let tokenDisposer = null;
-  let accentCache = null;
+  /** Cached { accent, wallpaper } from the last image analysis. */
+  let imageCache = null;
   let applySeq = 0;
+  const scanner = createSurfaceScanner();
+  /** OS "reduce transparency" preference; forces the opaque end of every tier. */
+  const reduceQuery = typeof matchMedia === "function" ? matchMedia("(prefers-reduced-transparency: reduce)") : null;
 
   const syncRow = () => {
     if (!bound) return;
     bound.sync(stored);
   };
 
-  /** Apply (or re-apply) the token layer with the cached accent + current frost. */
+  /**
+   * Fold a patch into the persisted state, then push it to the row and the
+   * document. The visual update is applied even when persistence fails (a
+   * full quota is no reason to withhold the effect the user just asked for).
+   * @returns false when the write to localStorage threw.
+   */
+  const commit = (patch) => {
+    stored = { ...stored, ...patch };
+    let persisted = true;
+    try {
+      writeStored(stored);
+    } catch (err) {
+      console.error("[dsh-skin-glass] persist failed:", err);
+      persisted = false;
+    }
+    syncRow();
+    refresh(stored);
+    return persisted;
+  };
+
+  /** Apply (or re-apply) the token layer with the cached analysis + current settings. */
   const applyTokens = () => {
-    if (!accentCache) return;
-    tokenDisposer = ctx.theme.overrideTokens("dsh-skin-glass", glassColor.buildTokens(accentCache, stored.blur / 48));
+    if (!imageCache) return;
+    // a media query cannot reach the token layer, so the OS preference is
+    // honoured here by collapsing translucency to its most legible end
+    const t = reduceQuery !== null && reduceQuery.matches ? 0 : stored.translucency;
+    tokenDisposer = ctx.theme.overrideTokens("dsh-skin-glass", glassColor.buildTokens(imageCache.accent, {
+      t,
+      blurPx: stored.blur,
+      wallpaper: imageCache.wallpaper
+    }));
+    // surface alphas just changed, so what counts as a glass surface — and how
+    // hard nested fills must be held back — changed with them
+    scanner.setTintScale(glassColor.nestedTintScale(t));
+    scanner.retag();
   };
 
   /** Re-render the glass chrome and (re)apply the token layer. */
   const refresh = (value) => {
     const image = value && typeof value.image === "string" ? value.image : "";
-    const blur = value && typeof value.blur === "number" ? value.blur : 18;
+    const blur = value && typeof value.blur === "number" ? value.blur : DEFAULT_BLUR;
+    const t = value && typeof value.translucency === "number" ? value.translucency : DEFAULT_TRANSLUCENCY;
     const root = document.documentElement;
     const escaped = image.replace(/"/g, '\\"');
     root.style.setProperty("--dsh-glass-image", image ? `url("${escaped}")` : "none");
     root.style.setProperty("--dsh-glass-blur", `${blur}px`);
+    // surfaces blur their own backdrop less than the wallpaper does: they sit
+    // over app content, which should stay recognisable through the glass
+    root.style.setProperty("--dsh-surface-blur", `${Math.max(6, Math.round(blur * 0.7))}px`);
+    // more glass to look through, more the light should bend through it
+    const displacement = document.querySelector(`#${REFRACT_ID} feDisplacementMap`);
+    if (displacement !== null) displacement.setAttribute("scale", String(Math.round(8 + 30 * t)));
+    // the chrome stylesheet is gated on this attribute: with no image the skin
+    // leaves the native theme completely untouched
+    if (image) root.setAttribute("data-dsh-glass", "");
+    else root.removeAttribute("data-dsh-glass");
     if (!image) {
-      accentCache = null;
+      imageCache = null;
+      scanner.clear();
       if (tokenDisposer) {
         tokenDisposer();
         tokenDisposer = null;
       }
       return;
     }
-    if (accentCache) {
-      applyTokens();   // blur-only change: same accent, new frost
+    if (imageCache) {
+      applyTokens();   // blur/translucency-only change: same image analysis
       return;
     }
     const seq = ++applySeq;
-    extractAccent(image).then((accent) => {
+    analyzeImage(image).then((analysis) => {
       if (seq !== applySeq) return;
-      accentCache = accent;
+      imageCache = analysis;
       applyTokens();
     }).catch((err) => {
       if (seq !== applySeq) return;
-      console.error("[dsh-skin-glass] extractAccent failed:", err);
+      console.error("[dsh-skin-glass] analyzeImage failed:", err);
       bound && bound.error("glass.error.decode");
     });
   };
@@ -283,6 +757,7 @@ function apply(ctx) {
   console.log("[dsh-skin-glass] ready:", JSON.stringify({
     image: stored.image ? "set" : "none",
     blur: stored.blur,
+    translucency: stored.translucency,
     theme: typeof ctx.theme.overrideTokens === "function"
   }));
 
@@ -290,13 +765,43 @@ function apply(ctx) {
     return () => {
       if (tokenDisposer) tokenDisposer();
       tokenDisposer = null;
+      scanner.stop();
+      const host = document.getElementById("dsh-glass-filters");
+      if (host !== null) host.remove();
       const root = document.documentElement;
+      root.removeAttribute("data-dsh-glass");
       root.style.removeProperty("--dsh-glass-image");
       root.style.removeProperty("--dsh-glass-blur");
+      root.style.removeProperty("--dsh-surface-blur");
     };
   }, "dsh-skin-glass: token layer");
 
+  // The product streams markdown and mounts popovers through portals, so new
+  // surfaces appear constantly; each added subtree is queued and tagged during
+  // idle time rather than synchronously in the mutation callback.
+  ctx.effect(() => {
+    if (typeof MutationObserver !== "function") return () => {};
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          scanner.repairFixed(node);
+          scanner.add(node);
+        }
+        if (record.removedNodes.length > 0) scanner.checkReleases();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, "dsh-skin-glass: surface observer");
+
   ctx.effect(() => ctx.locale.register(GLASS_NS, { zh, en }), "dsh-skin-glass: row dictionaries");
+
+  ctx.effect(() => {
+    if (reduceQuery === null) return () => {};
+    const onChange = () => applyTokens();
+    reduceQuery.addEventListener("change", onChange);
+    return () => reduceQuery.removeEventListener("change", onChange);
+  }, "dsh-skin-glass: reduced-transparency listener");
 
   ctx.slots.inject("settings.general.item", () => ctx.slots.register({
     name: "settings.general.item",
@@ -311,19 +816,13 @@ function apply(ctx) {
         chooseFile: (file) => {
           bound.status("glass.processing");
           processImageFile(file).then((dataUrl) => {
-            stored = { ...stored, image: dataUrl };
-            try {
-              writeStored(stored);
-            } catch (err) {
-              console.error("[dsh-skin-glass] persist failed:", err);
+            if (!commit({ image: dataUrl })) {
               bound.status("");
               bound.error("glass.error.write");
               return;
             }
             bound.status("");
             bound.error("");
-            syncRow();
-            refresh(stored);
           }).catch((err) => {
             console.error("[dsh-skin-glass] chooseFile failed:", err);
             bound.status("");
@@ -331,24 +830,13 @@ function apply(ctx) {
           });
         },
         clearImage: () => {
-          stored = { ...stored, image: "" };
-          try {
-            writeStored(stored);
-          } catch (err) {
-            console.error("[dsh-skin-glass] persist failed:", err);
-          }
-          syncRow();
-          refresh(stored);
+          commit({ image: "" });
         },
         setBlur: (v) => {
-          stored = { ...stored, blur: Math.round(v) };
-          try {
-            writeStored(stored);
-          } catch (err) {
-            console.error("[dsh-skin-glass] persist failed:", err);
-          }
-          syncRow();
-          refresh(stored);
+          commit({ blur: Math.round(v) });
+        },
+        setTranslucency: (v) => {
+          commit({ translucency: Math.max(0, Math.min(1, v)) });
         }
       };
     }

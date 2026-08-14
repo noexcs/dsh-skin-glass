@@ -30,4 +30,5 @@ ${main}
 `;
 
 writeFileSync(join(root, "lib/client.js"), bundle);
-console.log(`built lib/client.js (${bundle.length} bytes)`);
+// byte length, not string length: the i18n dictionaries are CJK, so the two differ
+console.log(`built lib/client.js (${Buffer.byteLength(bundle, "utf8")} bytes)`);

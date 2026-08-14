@@ -4,6 +4,10 @@
   "description": "Frosted-glass skin for the DeepSeek Harness web UI: pick any image as background, theme colors extracted from it, glassmorphism surfaces.",
   "type": "module",
   "main": "lib/index.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && node --check lib/client.js && node scripts/check-contrast.mjs && node scripts/check-surfaces.mjs"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",

@@ -4,7 +4,15 @@
 
 - 🖼️ **任意背景图**：设置 → 通用 → 背景图，选择本地图片（自动压缩为 data URL 持久化）
 - 🎨 **主题色自动提取**：从背景图提取主色调（k-means 量化），生成整套浅色/深色设计令牌
-- 🧊 **毛玻璃效果**：面板半透明 + `backdrop-filter` 模糊，组件呈玻璃质感；模糊强度可调
+- 💎 **逐组件真玻璃**：运行时识别每个玻璃面并单独上 `backdrop-filter`，面板透出的是
+  **背后的应用内容**而不只是壁纸；大浮层额外叠 SVG 位移**折射**（Chromium）
+- ✨ **镜面边缘高光**：浮层左上亮、右下暗的内描边，让玻璃有厚度
+- 🧊 **模糊与通透度分开调**：「背景模糊」只柔化壁纸，「通透度」只放开聊天背景与侧边栏
+- 🔆 **遮罩按图自适应**：分析壁纸明暗后只压制真正影响可读性的方向——深色壁纸在深色模式下
+  几乎不加遮罩，同样的通透度看起来更透
+- 👓 **字迹永远看得清**：弹窗、菜单、代码块、输入框等阅读区域有不透明度下限，
+  最通透档位下正文对比度仍 ≥ WCAG AA（由 `scripts/check-contrast.mjs` 9100 组断言守住），
+  并跟随系统的「降低透明度」偏好
 
 | 效果预览 | |
 | --- | --- |
@@ -28,6 +36,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/noexcs/dsh-skin-glass/main/i
 
 安装脚本会自动完成：安装到 web profile → 自动重启 `dsh web` → 就绪后提示。
 刷新页面后到 **设置 → 通用 → 背景图** 选择图片即可生效（偏好保存在浏览器本地）。
+没有设置背景图时，皮肤完全不介入，外观与原生主题一致。
 
 ## 快速卸载
 
@@ -50,8 +59,9 @@ dsh-skin-glass/
 ├── package.json       # 插件包（dsh.bundle + dsh.client 双 manifest）
 ├── cordis.patch.yml   # bundle patch 层，挂载插件行
 ├── lib/               # 宿主侧（设置命名空间注册）+ 浏览器侧 bundle
-├── src/               # 源码：color.cjs（取色数学）+ main.js（客户端逻辑）
+├── src/               # 源码：color.cjs（取色数学 + 分层令牌）+ main.js（客户端逻辑）
 ├── scripts/build.mjs  # 由 src 生成 lib/client.js
+├── scripts/check-contrast.mjs  # 正文对比度断言（WCAG AA）
 ├── install.sh / uninstall.sh / restart-web.sh
 └── docs/development.md  # 实现原理（面向开发者）
 ```

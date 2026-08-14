@@ -71,9 +71,10 @@ function rgb(rgb) {
   return `rgb(${rgbStr(rgb)})`;
 }
 
-/** rgba(r, g, b, a) CSS string. */
+/** rgba(r, g, b, a) CSS string; alpha is clamped and rounded to 3 decimals. */
 function rgba(rgb, a) {
-  return `rgba(${rgbStr(rgb)}, ${a})`;
+  const alpha = Math.round(Math.max(0, Math.min(1, a)) * 1000) / 1000;
+  return `rgba(${rgbStr(rgb)}, ${alpha})`;
 }
 
 /**
@@ -141,6 +142,33 @@ function pickAccent(clusters) {
   return [accent.r, accent.g, accent.b];
 }
 
+/**
+ * Summarize a wallpaper's brightness from the same [r,g,b] samples the
+ * quantizer consumes, so the scrim can be sized to the actual image instead
+ * of to the worst image imaginable.
+ *
+ * Luma is gamma-encoded (perceptual) rather than linearized: we want "how
+ * bright does this look", and linear luminance is dominated by highlights.
+ * The samples come from a 64×64 downscale of an up-to-1920px image, i.e.
+ * each sample is already a heavy box-average — which makes `stdL` a decent
+ * stand-in for the variance that survives the chrome layer's blur.
+ *
+ * @returns { meanL, stdL } both in 0..1 (stdL saturates well below 0.5).
+ */
+function analyzeWallpaper(samples) {
+  if (samples.length === 0) return { meanL: 0.5, stdL: 0.5 };
+  let sum = 0;
+  let sumSq = 0;
+  for (const [r, g, b] of samples) {
+    const l = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    sum += l;
+    sumSq += l * l;
+  }
+  const meanL = sum / samples.length;
+  const variance = Math.max(0, sumSq / samples.length - meanL * meanL);
+  return { meanL, stdL: Math.sqrt(variance) };
+}
+
 /* ── Token table builder ──────────────────────────────────────────── */
 
 const WHITE = [255, 255, 255];
@@ -149,22 +177,66 @@ const NAVY = [10, 14, 24];
 const NAVY2 = [16, 21, 36];
 const INK = [23, 26, 32];
 const INK2 = [80, 85, 96];
+/** Wallpaper scrim base in dark mode (a touch deeper than the app background). */
+const SCRIM_DARK = [8, 11, 20];
+/** Modal scrim bases. */
+const MASK_INK = [20, 24, 40];
+const BLACK = [0, 0, 0];
 
-/** Frost factor 0..1 (blur/48): scales surface translucency — more blur, more frosted. */
-const clampFrost = (frost) => Math.max(0, Math.min(1, frost === undefined ? 0.375 : frost));
+/** Clamp to 0..1. */
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+/** Default translucency when the caller passes nothing. */
+const DEFAULT_T = 0.45;
+
+/** Translucency 0..1 — 0 is the most legible (near-opaque), 1 the most see-through. */
+const clampT = (t) => Math.max(0, Math.min(1, typeof t === "number" && isFinite(t) ? t : DEFAULT_T));
 
 /** One { light, dark } token pair. */
 const pair = (light, dark) => ({ light, dark });
 
 /**
+ * How much of its alpha a background keeps when it is painted *inside* an
+ * already-translucent surface.
+ *
+ * A nested fill was designed to sit on an opaque plate, where its only job is
+ * to tint. Over glass it does that job *and* adds opacity, and a panel whose
+ * rows each carry their own fill (the trajectory view) turns solid no matter
+ * how transparent its own token is. Scaling the nested alpha keeps the tint
+ * and drops the accumulation.
+ *
+ * At t = 0 the scale is 1: surfaces are near-opaque anyway, so nothing is
+ * gained by washing the tints out.
+ *
+ * Shared by the runtime detector and by scripts/check-contrast.mjs, which
+ * must model the same compositing the browser will actually perform.
+ */
+function nestedTintScale(t) {
+  return 1 - 0.7 * clampT(t);
+}
+
+/**
  * Build the { light, dark } token pair table for the glass skin from one
  * accent color extracted from the background image.
+ *
+ * Surfaces are tiered by what they carry, and each tier has its own alpha
+ * range, so translucency can never drag a text-bearing surface below a
+ * legible floor (see docs/development.md):
+ *   A — see-through chrome: app background, sidebar (widest range)
+ *   B — half-frosted reading surfaces: bubbles, inputs, code, small fills
+ *   C — floating reading surfaces: dialogs, menus, overlays (highest floor)
+ * The scrim flattens the wallpaper's luminance under everything, which is
+ * what lets tier A open up without costing body-text contrast.
+ *
  * @param accent - [r, g, b] accent triplet.
- * @param frost - 0..1 frosted intensity (blur strength / 48).
+ * @param options - { t: 0..1 translucency, blurPx: wallpaper blur radius,
+ *   wallpaper: { meanL, stdL } from {@link analyzeWallpaper} — omit it and
+ *   the scrim falls back to worst-case strength }.
  */
-function buildTokens(accent, frost = 0.375) {
+function buildTokens(accent, options = {}) {
   const a = accent;
-  const f = clampFrost(frost);
+  const t = clampT(options.t);
+  const blurPx = typeof options.blurPx === "number" && isFinite(options.blurPx) ? Math.max(0, options.blurPx) : 18;
   const aLight = tune(a, 0.5, 0.58);      // accent usable on light surfaces
   const aDark = tune(a, 0.74, 0.58);      // accent usable on dark surfaces
   const fillLight = `linear-gradient(135deg, ${rgb(tune(a, 0.5, 0.62))}, ${rgb(tune(a, 0.62, 0.68))})`;
@@ -172,23 +244,59 @@ function buildTokens(accent, frost = 0.375) {
   const hoverLight = `linear-gradient(135deg, ${rgb(tune(a, 0.44, 0.6))}, ${rgb(tune(a, 0.56, 0.66))})`;
   const hoverDark = `linear-gradient(135deg, ${rgb(tune(a, 0.86, 0.6))}, ${rgb(tune(a, 0.74, 0.66))})`;
 
-  // translucent surface alphas, coupled to the frosted intensity
-  const L1 = 0.4 + 0.34 * f;    // layer-1
-  const L2 = 0.3 + 0.3 * f;     // layer-2
-  const L3 = 0.45 + 0.33 * f;   // layer-3
-  const LB = 0.32 + 0.34 * f;   // bg-base
-  const LS = 0.3 + 0.26 * f;    // sidebar
-  const LU = 0.38 + 0.3 * f;    // input / bubble
-  const LM = 0.6 + 0.28 * f;    // menu
-  const LC = 0.3 + 0.28 * f;    // code block
-  const D1 = 0.4 + 0.34 * f;
-  const D2 = 0.32 + 0.3 * f;
-  const D3 = 0.45 + 0.33 * f;
-  const DB = 0.3 + 0.34 * f;
-  const DS = 0.28 + 0.26 * f;
-  const DU = 0.36 + 0.3 * f;
-  const DM = 0.6 + 0.28 * f;
-  const DC = 0.28 + 0.28 * f;
+  // Tier alphas. Every glass surface now carries its own backdrop-filter (the
+  // runtime detector in main.js tags them), so a surface finally shows the
+  // *app content* behind it rather than just tinting a pre-blurred wallpaper
+  // — which is what lets these run far more transparent than the flat-alpha
+  // design could afford. The reading tiers still keep a floor; what protects
+  // them at the bottom of the range is the scrim, not their own opacity.
+  const aBase = 0.9 - 0.62 * t;   // A: app background (assistant text sits here)
+  const aSide = 0.86 - 0.62 * t;  // A: sidebar
+  const aMid = 0.94 - 0.3 * t;    // B: bubbles, inputs, code, small fills
+  const aTop = 0.96 - 0.24 * t;   // C: dialogs, menus, overlays
+
+  // Wallpaper scrim: flattens the image's luminance swings so a translucent
+  // surface has a predictable backdrop, and it is what carries legibility at
+  // high translucency.
+  //
+  // Only one direction actually threatens each palette — a *dark* wallpaper
+  // is what endangers dark-on-light text, a *bright* one endangers light-on-
+  // dark — so each mode sizes its scrim from the threat it faces plus the
+  // image's contrastiness. `need = 1` reproduces the fixed worst-case values,
+  // which is the floor a featureless black (light mode) or white (dark mode)
+  // wallpaper still gets. A friendly image lands far below it and buys real
+  // transparency back.
+  const wall = options.wallpaper;
+  const meanL = wall !== undefined && isFinite(wall.meanL) ? clamp01(wall.meanL) : undefined;
+  const stdL = wall !== undefined && isFinite(wall.stdL) ? clamp01(wall.stdL) : 0;
+  // The 1.6 on stdL is calibrated, not guessed: at 1.2 a busy mid-luminance
+  // wallpaper drove the dark-mode sidebar to 4.47:1, just under AA
+  // (scripts/check-contrast.mjs pins this).
+  const needLight = meanL === undefined ? 1 : clamp01(1 - meanL + 1.6 * stdL);
+  const needDark = meanL === undefined ? 1 : clamp01(meanL + 1.6 * stdL);
+  const scrim = pair(
+    rgba(WHITE, 0.04 + t * 0.44 * needLight),
+    rgba(SCRIM_DARK, 0.06 + t * 0.52 * needDark)
+  );
+
+  // Modal scrims + the product's own mask blur hook (`.mask` elements already
+  // declare `backdrop-filter: var(--dsw-mask-blur)`); raising it puts a real
+  // frost between a dialog and the app content behind it.
+  const maskBlur = `blur(${Math.max(8, Math.round(blurPx * 0.75))}px)`;
+
+  // Specular rim: the bright top-left / dark bottom-right inner edge is where
+  // a pane of glass gets its thickness. Injected through the elevation tokens
+  // because every elevated surface in the product consumes them as
+  // `box-shadow` (21 call sites, none of them `filter: drop-shadow()`), so
+  // this reaches dialogs, menus, panels and toasts without a single selector.
+  const rim = (strength) => `inset 1px 1px 0 rgba(255, 255, 255, ${strength}), inset -1px -1px 0 rgba(10, 14, 24, 0.1)`;
+  const rimDark = (strength) => `inset 1px 1px 0 rgba(255, 255, 255, ${strength}), inset -1px -1px 0 rgba(0, 0, 0, 0.3)`;
+
+  // Borders read as neutral hairlines rather than pure accent, so panel
+  // dividers survive over a busy wallpaper.
+  const edgeLight = mix(a, INK, 0.5);
+  const edgeDark = mix(a, WHITE, 0.5);
+  const edge = (alpha) => pair(rgba(edgeLight, alpha), rgba(edgeDark, alpha + 0.06));
 
   // static bluish-neutral scale: components reference these directly.
   // light mode: white→ink with a 5% accent tint; dark mode: navy→near-white
@@ -215,75 +323,102 @@ function buildTokens(accent, frost = 0.375) {
 
   return {
     ...statics,
-    "--dsw-alias-brand-primary": { light: rgb(aLight), dark: rgb(aDark) },
-    "--dsw-alias-brand-text": { light: rgb(aLight), dark: rgb(aDark) },
-    "--dsw-alias-brand-primary-invert": { light: rgb(NAVY), dark: rgb(PAPER) },
-    "--dsw-alias-button-primary-fill": { light: fillLight, dark: fillDark },
-    "--dsw-alias-button-primary-hover": { light: hoverLight, dark: hoverDark },
-    "--dsw-alias-button-primary-dimmed": { light: rgba(mix(WHITE, a, 0.2), 0.6), dark: rgba(mix(NAVY2, a, 0.32), 0.6) },
-    "--dsw-alias-button-info-fill": { light: rgb(aLight), dark: rgb(aDark) },
-    "--dsw-alias-button-info-hover": { light: rgb(tune(a, 0.58, 0.6)), dark: rgb(tune(a, 0.8, 0.6)) },
-    "--dsw-alias-button-elevated-fill": { light: rgba(WHITE, L1), dark: rgba(NAVY2, D1) },
-    "--dsw-alias-button-floating-fill": { light: rgba(WHITE, L1 + 0.05), dark: rgba(NAVY2, D1 + 0.05) },
-    "--dsw-alias-button-floating-hover": { light: rgba(mix(WHITE, a, 0.1), L1 + 0.12), dark: rgba(mix(NAVY2, a, 0.18), D1 + 0.12) },
-    "--dsw-alias-button-ghost-active-fill": { light: rgba(mix(WHITE, a, 0.14), L2 + 0.15), dark: rgba(mix(NAVY2, a, 0.24), D2 + 0.15) },
-    "--dsw-alias-button-ghost-active-hover": { light: rgba(mix(WHITE, a, 0.2), L2 + 0.25), dark: rgba(mix(NAVY2, a, 0.32), D2 + 0.25) },
-    "--dsw-alias-button-tool-bar-fill": { light: "rgba(255, 255, 255, 0.5)", dark: "rgba(93, 103, 140, 0.4)" },
-    "--dsw-alias-button-tool-bar-hover": { light: "rgba(255, 255, 255, 0.65)", dark: "rgba(93, 103, 140, 0.55)" },
-    "--dsw-alias-bg-base": { light: rgba(mix(WHITE, a, 0.06), LB), dark: rgba(mix(NAVY, a, 0.14), DB) },
-    "--dsw-alias-bg-layer-1": { light: rgba(WHITE, L1), dark: rgba(NAVY2, D1) },
-    "--dsw-alias-bg-layer-2": { light: rgba(PAPER, L2), dark: rgba(mix(NAVY, a, 0.08), D2) },
-    "--dsw-alias-bg-layer-3": { light: rgba(WHITE, L3), dark: rgba(mix(NAVY2, a, 0.14), D3) },
-    "--dsw-alias-bg-module-platform": { light: rgba(PAPER, L2 + 0.12), dark: rgba(mix(NAVY2, a, 0.16), D2 + 0.12) },
-    "--dsw-alias-bg-multi-select": { light: rgba(PAPER, L2 + 0.12), dark: rgba(mix(NAVY2, a, 0.16), D2 + 0.12) },
-    "--dsw-alias-bg-overlay": { light: rgba(mix(WHITE, a, 0.14), 0.82), dark: rgba(mix(NAVY2, a, 0.26), 0.82) },
-    "--dsw-alias-bg-mask-drop": { light: rgba(WHITE, 0.5), dark: rgba(NAVY, 0.55) },
-    "--dsw-alias-border-l1": { light: rgba(a, 0.09), dark: rgba(a, 0.15) },
-    "--dsw-alias-border-l2": { light: rgba(a, 0.15), dark: rgba(a, 0.22) },
-    "--dsw-alias-border-l3": { light: rgba(a, 0.21), dark: rgba(a, 0.28) },
-    "--dsw-alias-border-l4": { light: rgba(a, 0.28), dark: rgba(a, 0.34) },
-    "--dsw-alias-interactive-bg-hover": { light: rgba(a, 0.07), dark: rgba(a, 0.13) },
-    "--dsw-alias-interactive-bg-hover-accent": { light: rgba(a, 0.13), dark: rgba(a, 0.2) },
-    "--dsw-alias-interactive-bg-active": { light: rgba(a, 0.11), dark: rgba(a, 0.18) },
-    "--dsw-alias-interactive-bg-hover-solid": { light: rgba(mix(WHITE, a, 0.08), 0.7), dark: rgba(mix(NAVY2, a, 0.16), 0.7) },
-    "--dsw-alias-interactive-bg-hover-danger": { light: "rgba(236, 19, 19, 0.06)", dark: "rgba(242, 90, 90, 0.16)" },
-    "--dsw-alias-label-primary": { light: rgb(INK), dark: rgb(232, 236, 248) },
-    "--dsw-alias-label-secondary": { light: rgb(INK2), dark: rgb(168, 174, 196) },
-    "--dsw-alias-label-tertiary": { light: rgb(112, 118, 132), dark: rgb(122, 130, 156) },
-    "--dsw-alias-label-caption": { light: rgb(122, 128, 142), dark: rgb(122, 130, 156) },
-    "--dsw-alias-label-dimmed": { light: rgb(226, 228, 234), dark: rgb(44, 51, 72) },
-    "--dsw-alias-label-primary-inverted": { light: rgb(WHITE), dark: rgb(30, 36, 52) },
-    "--dsw-alias-markdown-code-block": { light: rgba(mix(WHITE, a, 0.04), LC), dark: rgba(mix(NAVY, a, 0.1), DC) },
-    "--dsw-alias-markdown-code-block-banner": { light: rgba(mix(WHITE, a, 0.08), LC + 0.06), dark: rgba(mix(NAVY2, a, 0.14), DC + 0.06) },
-    "--dsw-alias-markdown-inline-code": { light: rgba(mix(WHITE, a, 0.14), LU + 0.12), dark: rgba(mix(NAVY2, a, 0.26), DU + 0.12) },
-    "--dsw-alias-markdown-code-segment-selected": { light: rgba(WHITE, L1 + 0.12), dark: rgba(mix(NAVY2, a, 0.22), D1 + 0.12) },
-    "--dsw-alias-markdown-code-segment-unselected": { light: rgba(mix(WHITE, a, 0.06), LC), dark: rgba(mix(NAVY, a, 0.12), DC) },
-    "--dsw-alias-markdown-citation": { light: rgba(mix(WHITE, a, 0.1), L2 + 0.06), dark: rgba(mix(NAVY2, a, 0.16), D2 + 0.06) },
-    "--dsw-alias-markdown-placeholder": { light: rgba(PAPER, L2), dark: rgba(NAVY2, D2) },
-    "--dsw-alias-markdown-tag": { light: rgba(mix(WHITE, a, 0.1), L2 + 0.1), dark: rgba(mix(NAVY2, a, 0.18), D2 + 0.1) },
-    "--dsw-alias-scrollbar-bg-l1": { light: rgba(a, 0.16), dark: rgba(a, 0.24) },
-    "--dsw-alias-scrollbar-bg-l2": { light: rgba(a, 0.16), dark: rgba(a, 0.24) },
-    "--dsw-alias-scrollbar-hover-l1": { light: rgba(a, 0.32), dark: rgba(a, 0.4) },
-    "--dsw-alias-scrollbar-hover-l2": { light: rgba(a, 0.32), dark: rgba(a, 0.4) },
-    "--dsw-alias-state-business-primary": { light: rgb(aLight), dark: rgb(aDark) },
-    "--dsw-alias-state-business-tertiary": { light: rgba(mix(WHITE, a, 0.2), 0.55), dark: rgba(mix(NAVY2, a, 0.34), 0.55) },
-    "--dsw-alias-toast-bg": { light: "rgba(24, 28, 38, 0.82)", dark: "rgba(26, 33, 56, 0.82)" },
-    "--dsw-alias-tooltip-bg": { light: "rgba(24, 28, 38, 0.84)", dark: "rgba(26, 33, 56, 0.84)" },
-    "--dsw-specific-sidebar-fill": { light: rgba(245, 247, 253, LS), dark: rgba(13, 17, 30, DS) },
-    "--dsw-specific-sidebar-nav-item-active": { light: rgba(a, 0.13), dark: rgba(a, 0.2) },
-    "--dsw-specific-sidebar-nav-item-active-accent": { light: rgba(a, 0.2), dark: rgba(a, 0.3) },
-    "--dsw-specific-sidebar-nav-item-hover": { light: rgba(mix(WHITE, a, 0.06), LS + 0.1), dark: rgba(mix(NAVY2, a, 0.12), DS + 0.1) },
-    "--dsw-specific-bubble": { light: rgba(mix(WHITE, a, 0.09), LU), dark: rgba(mix(NAVY2, a, 0.2), DU) },
-    "--dsw-specific-bubble-highlight": { light: rgba(mix(WHITE, a, 0.16), LU + 0.1), dark: rgba(mix(NAVY2, a, 0.3), DU + 0.1) },
-    "--dsw-specific-input-major": { light: rgba(WHITE, LU + 0.08), dark: rgba(18, 23, 41, DU + 0.08) },
-    "--dsw-specific-login-input": { light: rgba(PAPER, LU), dark: rgba(16, 21, 39, DU) },
-    "--dsw-specific-selector": { light: rgba(PAPER, L2 + 0.12), dark: rgba(mix(NAVY2, a, 0.16), D2 + 0.12) },
-    "--dsw-specific-tip": { light: rgba(PAPER, L2), dark: rgba(NAVY2, D2) },
-    "--dsw-specific-menu": { light: rgba(WHITE, LM), dark: rgba(26, 33, 56, DM) },
-    "--dsw-shadow-lv1": { light: "0 2px 4px rgba(20, 24, 40, 0.08)", dark: "0 2px 4px rgba(0, 0, 0, 0.3)" },
-    "--dsw-shadow-lv1-blur": { light: "0 4px 12px rgba(20, 24, 40, 0.05)", dark: "0 4px 12px rgba(0, 0, 0, 0.2)" },
-    "--dsw-shadow-lv2": { light: `0 4px 12px ${rgba(a, 0.1)}, 0 2px 8px rgba(20, 24, 40, 0.08)`, dark: "0 4px 12px rgba(0, 0, 0, 0.24), 0 2px 8px rgba(0, 0, 0, 0.3)" },
-    "--dsw-shadow-lv3": { light: `0 0 1px rgba(20, 24, 40, 0.2), 0 12px 32px ${rgba(a, 0.14)}`, dark: "0 0 1px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.42)" }
+    /* wallpaper + modal scrims (consumed by the chrome stylesheet and by the
+       product's own `.mask` elements) */
+    "--dsh-glass-scrim": scrim,
+    "--dsw-mask-blur": pair(maskBlur, maskBlur),
+    "--dsw-alias-bg-mask-1": pair(rgba(MASK_INK, 0.18 + 0.16 * t), rgba(BLACK, 0.4 + 0.18 * t)),
+    "--dsw-alias-bg-mask-2": pair(rgba(MASK_INK, 0.1 + 0.1 * t), rgba(BLACK, 0.24 + 0.14 * t)),
+    "--dsw-alias-bg-mask-3": pair(rgba(MASK_INK, 0.34 + 0.18 * t), rgba(BLACK, 0.56 + 0.16 * t)),
+    "--dsw-alias-bg-mask-drop": pair(rgba(WHITE, 0.6), rgba(NAVY, 0.65)),
+
+    /* accent-driven, fully opaque */
+    "--dsw-alias-brand-primary": pair(rgb(aLight), rgb(aDark)),
+    "--dsw-alias-brand-text": pair(rgb(aLight), rgb(aDark)),
+    "--dsw-alias-brand-primary-invert": pair(rgb(NAVY), rgb(PAPER)),
+    "--dsw-alias-button-primary-fill": pair(fillLight, fillDark),
+    "--dsw-alias-button-primary-hover": pair(hoverLight, hoverDark),
+    "--dsw-alias-button-info-fill": pair(rgb(aLight), rgb(aDark)),
+    "--dsw-alias-button-info-hover": pair(rgb(tune(a, 0.58, 0.6)), rgb(tune(a, 0.8, 0.6))),
+    "--dsw-alias-state-business-primary": pair(rgb(aLight), rgb(aDark)),
+
+    /* tier A — see-through chrome */
+    "--dsw-alias-bg-base": pair(rgba(mix(WHITE, a, 0.06), aBase), rgba(mix(NAVY, a, 0.14), aBase)),
+    "--dsw-specific-sidebar-fill": pair(rgba(mix(PAPER, a, 0.05), aSide), rgba(mix([13, 17, 30], a, 0.07), aSide)),
+    "--dsw-specific-sidebar-nav-item-hover": pair(rgba(mix(WHITE, a, 0.12), aSide + 0.12), rgba(mix(NAVY2, a, 0.2), aSide + 0.12)),
+    "--dsw-specific-sidebar-nav-item-active": pair(rgba(a, 0.18), rgba(a, 0.26)),
+    "--dsw-specific-sidebar-nav-item-active-accent": pair(rgba(a, 0.26), rgba(a, 0.36)),
+
+    /* tier B — half-frosted reading surfaces */
+    "--dsw-alias-bg-layer-1": pair(rgba(WHITE, aMid), rgba(NAVY2, aMid)),
+    "--dsw-alias-bg-module-platform": pair(rgba(PAPER, aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
+    "--dsw-alias-bg-multi-select": pair(rgba(PAPER, aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
+    "--dsw-alias-button-elevated-fill": pair(rgba(WHITE, aMid), rgba(NAVY2, aMid)),
+    "--dsw-alias-button-floating-fill": pair(rgba(WHITE, aMid), rgba(NAVY2, aMid)),
+    "--dsw-alias-button-floating-hover": pair(rgba(mix(WHITE, a, 0.1), aMid + 0.03), rgba(mix(NAVY2, a, 0.18), aMid + 0.03)),
+    "--dsw-alias-button-ghost-active-fill": pair(rgba(mix(WHITE, a, 0.14), aMid), rgba(mix(NAVY2, a, 0.24), aMid)),
+    "--dsw-alias-button-ghost-active-hover": pair(rgba(mix(WHITE, a, 0.2), aMid + 0.03), rgba(mix(NAVY2, a, 0.32), aMid + 0.03)),
+    "--dsw-alias-button-primary-dimmed": pair(rgba(mix(WHITE, a, 0.2), aMid - 0.14), rgba(mix(NAVY2, a, 0.32), aMid - 0.14)),
+    "--dsw-alias-button-tool-bar-fill": pair(rgba(mix(WHITE, a, 0.08), aMid), rgba(mix([60, 68, 96], a, 0.2), aMid)),
+    "--dsw-alias-button-tool-bar-hover": pair(rgba(mix(WHITE, a, 0.14), aMid + 0.03), rgba(mix([72, 80, 110], a, 0.2), aMid + 0.03)),
+    "--dsw-alias-interactive-bg-hover-solid": pair(rgba(mix(WHITE, a, 0.08), aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
+    "--dsw-alias-state-business-tertiary": pair(rgba(mix(WHITE, a, 0.2), aMid - 0.2), rgba(mix(NAVY2, a, 0.34), aMid - 0.2)),
+    "--dsw-specific-bubble": pair(rgba(mix(WHITE, a, 0.09), aMid), rgba(mix(NAVY2, a, 0.2), aMid)),
+    "--dsw-specific-bubble-highlight": pair(rgba(mix(WHITE, a, 0.16), aMid + 0.03), rgba(mix(NAVY2, a, 0.3), aMid + 0.03)),
+    "--dsw-specific-input-major": pair(rgba(WHITE, aMid + 0.02), rgba([18, 23, 41], aMid + 0.02)),
+    "--dsw-specific-login-input": pair(rgba(PAPER, aMid), rgba([16, 21, 39], aMid)),
+    "--dsw-specific-selector": pair(rgba(PAPER, aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
+    "--dsw-specific-tip": pair(rgba(PAPER, aMid), rgba(NAVY2, aMid)),
+    "--dsw-alias-markdown-code-block": pair(rgba(mix(WHITE, a, 0.04), aMid), rgba(mix(NAVY, a, 0.1), aMid)),
+    "--dsw-alias-markdown-code-block-banner": pair(rgba(mix(WHITE, a, 0.08), aMid + 0.03), rgba(mix(NAVY2, a, 0.14), aMid + 0.03)),
+    "--dsw-alias-markdown-inline-code": pair(rgba(mix(WHITE, a, 0.14), aMid), rgba(mix(NAVY2, a, 0.26), aMid)),
+    "--dsw-alias-markdown-code-segment-selected": pair(rgba(WHITE, aMid + 0.03), rgba(mix(NAVY2, a, 0.22), aMid + 0.03)),
+    "--dsw-alias-markdown-code-segment-unselected": pair(rgba(mix(WHITE, a, 0.06), aMid), rgba(mix(NAVY, a, 0.12), aMid)),
+    "--dsw-alias-markdown-citation": pair(rgba(mix(WHITE, a, 0.1), aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
+    "--dsw-alias-markdown-placeholder": pair(rgba(PAPER, aMid), rgba(NAVY2, aMid)),
+    "--dsw-alias-markdown-tag": pair(rgba(mix(WHITE, a, 0.1), aMid), rgba(mix(NAVY2, a, 0.18), aMid)),
+
+    /* tier C — floating reading surfaces (dialogs, menus, overlays) */
+    "--dsw-alias-bg-layer-2": pair(rgba(PAPER, aTop), rgba(mix(NAVY, a, 0.08), aTop)),
+    "--dsw-alias-bg-layer-3": pair(rgba(WHITE, aTop), rgba(mix(NAVY2, a, 0.14), aTop)),
+    "--dsw-alias-bg-overlay": pair(rgba(mix(WHITE, a, 0.14), aTop), rgba(mix(NAVY2, a, 0.26), aTop)),
+    "--dsw-specific-menu": pair(rgba(WHITE, aTop), rgba([26, 33, 56], aTop)),
+    "--dsw-alias-toast-bg": pair(rgba([24, 28, 38], aTop), rgba([26, 33, 56], aTop)),
+    "--dsw-alias-tooltip-bg": pair(rgba([24, 28, 38], aTop), rgba([26, 33, 56], aTop)),
+
+    /* hairlines, hover tints, scrollbars */
+    "--dsw-alias-border-l1": edge(0.14),
+    "--dsw-alias-border-l2": edge(0.24),
+    "--dsw-alias-border-l3": edge(0.34),
+    "--dsw-alias-border-l4": edge(0.45),
+    "--dsw-alias-interactive-bg-hover": pair(rgba(a, 0.1), rgba(a, 0.16)),
+    "--dsw-alias-interactive-bg-hover-accent": pair(rgba(a, 0.16), rgba(a, 0.24)),
+    "--dsw-alias-interactive-bg-active": pair(rgba(a, 0.15), rgba(a, 0.22)),
+    "--dsw-alias-interactive-bg-hover-danger": pair("rgba(236, 19, 19, 0.08)", "rgba(242, 90, 90, 0.18)"),
+    "--dsw-alias-scrollbar-bg-l1": pair(rgba(a, 0.22), rgba(a, 0.3)),
+    "--dsw-alias-scrollbar-bg-l2": pair(rgba(a, 0.22), rgba(a, 0.3)),
+    "--dsw-alias-scrollbar-hover-l1": pair(rgba(a, 0.4), rgba(a, 0.48)),
+    "--dsw-alias-scrollbar-hover-l2": pair(rgba(a, 0.4), rgba(a, 0.48)),
+
+    /* text — opaque, and deliberately not translucency-coupled */
+    "--dsw-alias-label-primary": pair(rgb(INK), rgb([232, 236, 248])),
+    "--dsw-alias-label-secondary": pair(rgb(INK2), rgb([168, 174, 196])),
+    "--dsw-alias-label-tertiary": pair(rgb([98, 104, 118]), rgb([150, 158, 182])),
+    "--dsw-alias-label-caption": pair(rgb([108, 114, 128]), rgb([146, 154, 178])),
+    "--dsw-alias-label-dimmed": pair(rgb([176, 180, 190]), rgb([74, 82, 104])),
+    "--dsw-alias-label-primary-inverted": pair(rgb(WHITE), rgb([30, 36, 52])),
+
+    /* elevation — the inset pair is the specular rim, see `rim` above */
+    "--dsw-shadow-lv1": pair("0 2px 4px rgba(20, 24, 40, 0.08)", "0 2px 4px rgba(0, 0, 0, 0.3)"),
+    "--dsw-shadow-lv1-blur": pair("0 4px 12px rgba(20, 24, 40, 0.05)", "0 4px 12px rgba(0, 0, 0, 0.2)"),
+    "--dsw-shadow-lv2": pair(
+      `${rim(0.4)}, 0 4px 12px ${rgba(a, 0.1)}, 0 2px 8px rgba(20, 24, 40, 0.08)`,
+      `${rimDark(0.08)}, 0 4px 12px rgba(0, 0, 0, 0.24), 0 2px 8px rgba(0, 0, 0, 0.3)`
+    ),
+    "--dsw-shadow-lv3": pair(
+      `${rim(0.55)}, 0 0 1px rgba(20, 24, 40, 0.2), 0 12px 32px ${rgba(a, 0.14)}`,
+      `${rimDark(0.12)}, 0 0 1px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.42)`
+    )
   };
 }
 
@@ -296,6 +431,8 @@ const glassColor = {
   rgba,
   quantize,
   pickAccent,
+  analyzeWallpaper,
+  nestedTintScale,
   buildTokens
 };
 

@@ -63,8 +63,11 @@ dsh-skin-glass/
 ├── src/               # 源码：color.cjs（取色数学 + 分层令牌）+ main.js（客户端逻辑）
 ├── scripts/build.mjs  # 由 src 生成 lib/client.js
 ├── scripts/check-contrast.mjs  # 正文对比度断言（WCAG AA）
+├── scripts/qa/        # 无重启验证：verify-glass.mjs（bundle 路由替换 + hover 回归）
+│                      # + pngdiff.cjs（纯 Node 像素 diff）
 ├── install.sh / uninstall.sh / restart-web.sh
-└── docs/development.md  # 实现原理（面向开发者）
+├── docs/development.md  # 实现原理（面向开发者）
+└── docs/debugging.md    # 调试与验证手册（含本次「效果消失」案例排查法）
 ```
 
 ## License

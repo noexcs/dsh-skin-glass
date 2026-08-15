@@ -15,9 +15,9 @@
   最通透档位下正文对比度仍 ≥ WCAG AA（由 `scripts/check-contrast.mjs` 10500 组断言守住），
   并跟随系统的「降低透明度」偏好
 
-| 效果预览 | |
+| 浅色模式 | 深色模式 |
 | --- | --- |
-| （截图待补充） | |
+| ![light mode](screenshots/screenshot_0.jpg) | ![dark mode](screenshots/screenshot_1.jpg) |
 
 ## 快速安装
 

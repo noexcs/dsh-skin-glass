@@ -12,12 +12,12 @@
 - 🔆 **遮罩按图自适应**：分析壁纸明暗后只压制真正影响可读性的方向——深色壁纸在深色模式下
   几乎不加遮罩，同样的通透度看起来更透
 - 👓 **字迹永远看得清**：弹窗、菜单、代码块、输入框等阅读区域有不透明度下限，
-  最通透档位下正文对比度仍 ≥ WCAG AA（由 `scripts/check-contrast.mjs` 9100 组断言守住），
+  最通透档位下正文对比度仍 ≥ WCAG AA（由 `scripts/check-contrast.mjs` 10500 组断言守住），
   并跟随系统的「降低透明度」偏好
 
-| 效果预览 | |
+| 浅色模式 | 深色模式 |
 | --- | --- |
-| （截图待补充） | |
+| ![light mode](screenshots/screenshot_0.jpg) | ![dark mode](screenshots/screenshot_1.jpg) |
 
 ## 快速安装
 

@@ -43,7 +43,7 @@ const sandbox = {
     if (name === "@deepseek-ai/dsh-client-runtime/client") return { defineStore: (d) => d };
     throw new Error("unexpected require: " + name);
   },
-  glassColor: {},
+  glassColor: { floatTintFloor: 0.55 },
   CSS: { supports: (prop, value) => prop === "backdrop-filter" && value.startsWith("url(") },
   getComputedStyle: (el) => computedOf(el),
   innerWidth: 1440,
@@ -127,6 +127,13 @@ const { tagSurface, createSurfaceScanner, alphaOf, GLASS_CSS, SURFACE_ATTR, SHEE
 // never becomes a containing block for the inline fixed tooltips
 check("sheet rule anchors the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]{position:relative}"), true);
 check("sheet frost rides the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]::before{"), true);
+// one refraction filter for every tagged surface — the command palette is
+// the reference effect, so there is deliberately no size-based gradation
+check("surfaces get the refraction filter",
+  GLASS_CSS.includes(`[data-dsh-glass-surface=lg]{${"-webkit-backdrop-filter:url(#dsh-glass-refract)"}`), true);
+check("sheets get the refraction filter",
+  GLASS_CSS.includes(`[data-dsh-glass-sheet=lg]::before{${"-webkit-backdrop-filter:url(#dsh-glass-refract)"}`), true);
+check("no leftover small-tier refraction rule", GLASS_CSS.includes("refract-sm"), false);
 check("reduced-transparency kills sheet frost too",
   /@media \(prefers-reduced-transparency: reduce\)\{[\s\S]*\[data-dsh-glass-sheet\]::before\{[^}]*backdrop-filter:none/.test(GLASS_CSS), true);
 // the frost value is emitted from one constant; if a refactor ever lets the
@@ -166,7 +173,17 @@ check("overlay gets refraction", panel.getAttribute(SURFACE_ATTR), "lg");
 
 const chip = makeEl({ bg: "rgba(255, 255, 255, 0.8)", w: 90, h: 30, position: "fixed" });
 check("small overlay is tagged", tagSurface(chip), true);
-check("small overlay skips refraction", chip.getAttribute(SURFACE_ATTR), "sm");
+check("small overlay gets the same refraction as the palette", chip.getAttribute(SURFACE_ATTR), "lg");
+
+/* when the engine cannot run url() backdrop filters (Safari, Firefox) the
+   marker must withhold the tier values entirely: the url() rules must never
+   match there, because an unresolvable url() invalidates the whole
+   backdrop-filter value and the base frost rule would die with it */
+const plainSandbox = { ...sandbox, CSS: { supports: () => false } };
+const plainApi = factory(...Object.values(plainSandbox), {}, { exports: {} });
+const nonRefractPanel = makeEl({ bg: "rgba(255, 255, 255, 0.8)", w: 400, h: 300, position: "fixed" });
+check("non-Chromium overlay is still tagged", plainApi.tagSurface(nonRefractPanel), true);
+check("non-Chromium marker withholds the url tier", nonRefractPanel.getAttribute(SURFACE_ATTR), "plain");
 
 // in-flow sheets (columns, cards, rows) get the sheet marker: the frost
 // rides a ::before pseudo, so hover tooltips inside them are never
@@ -188,11 +205,16 @@ const settingsShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position
 check("panel inside an overlay shell is tagged", tagSurface(settingsPanel), true);
 check("panel inside an overlay shell takes the real filter", settingsPanel.getAttribute(SURFACE_ATTR), "lg");
 
-// an element inside an already-marked region belongs to the outer marker
+// an element inside an already-marked region still gets its own sheet
+// pseudo — every component gets the palette treatment (the census gap:
+// bubbles, the composer, cards and buttons inside the conversation column
+// used to be tint-only)
 const nested = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 200, h: 100 });
 const markedShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 400, h: 300, children: [nested] });
 markedShell.setAttribute(SHEET_ATTR, "lg");
-check("element inside a marked region is not re-tagged", tagSurface(nested), false);
+check("element inside a marked region is tagged as a nested sheet", tagSurface(nested), true);
+check("nested surface carries the sheet marker", nested.getAttribute(SHEET_ATTR), "lg");
+check("nested surface gets no direct filter marker", nested.hasAttribute(SURFACE_ATTR), false);
 
 // a viewport-filling surface has only the (already blurred) wallpaper behind
 // it, so it must be skipped — but its children still need visiting
@@ -215,7 +237,10 @@ scanner.add(viewport);
 check("viewport root not tagged", viewport.hasAttribute(SHEET_ATTR), false);
 check("transparent wrapper not tagged", inert.hasAttribute(SHEET_ATTR), false);
 check("outermost glass tagged as sheet", child.hasAttribute(SHEET_ATTR), true);
-check("nested glass NOT tagged (no stacked filters)", grandchild.hasAttribute(SHEET_ATTR), false);
+// a repeat of the surface's own colour is merged, not tagged — tagging it
+// would re-introduce the opacity compounding the merge rule prevents
+check("repeat of the surface colour is merged, not tagged", grandchild.hasAttribute(SHEET_ATTR), false);
+check("and carries the merge marker", grandchild.hasAttribute(MERGE_ATTR), true);
 
 /* ── stacked repeats of the surface colour must be zeroed ─────────────
    The trajectory panel is `bg-layer-1` with several `bg-layer-1` children
@@ -342,12 +367,46 @@ scanner9.setTintScale(0.5);
 scanner9.add(sideShell);
 check("dialog panel takes the real filter", dlgPanel.getAttribute(SURFACE_ATTR), "lg");
 check("dialog panel fill is tinted inside the glass region", dlgPanel.getAttribute(TINT_ATTR), "rgba(246, 247, 252, 0.85)");
-check("dialog panel alpha is scaled", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.425)");
+check("dialog panel alpha is scaled", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
 
 // a retag while the dialog is open must keep the panel's frost and tint
 scanner9.retag();
 check("retag with the dialog open keeps the panel's filter", dlgPanel.getAttribute(SURFACE_ATTR), "lg");
-check("retag with the dialog open keeps the panel's tint", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.425)");
+check("retag with the dialog open keeps the panel's tint", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
+
+/* ── regression: panels inside a body-level modal shell are normalized ──
+   The Full-access confirm dialog mounts in its own portal root at body
+   level: no marked glass ancestor within the scan bound, so the old walk
+   left its fill at the full token alpha (0.85) while a palette mounted
+   inside the sidebar sheet was scaled to 0.58 — the two panels read
+   differently. Crossing an unmarked out-of-flow shell now starts a tint
+   context, so the dialog's fill is normalized like a nested fill's and both
+   surfaces read the same translucency. */
+
+const modalPanel = makeEl({ bg: "rgba(246, 247, 252, 0.85)", w: 442, h: 272 });
+const modalShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position: "fixed", children: [modalPanel] });
+sandbox.document.body = modalShell;
+const scanner13 = createSurfaceScanner();
+scanner13.setTintScale(0.3);
+scanner13.add(modalShell);
+check("modal panel takes the real filter", modalPanel.getAttribute(SURFACE_ATTR), "lg");
+check("modal panel fill is normalized, floored for legibility", modalPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
+check("modal panel remembers its original colour", modalPanel.getAttribute(TINT_ATTR), "rgba(246, 247, 252, 0.85)");
+
+// a retag while the dialog is open must keep both the filter and the tint
+scanner13.retag();
+check("retag keeps the modal panel's filter", modalPanel.getAttribute(SURFACE_ATTR), "lg");
+check("retag keeps the modal panel's tint", modalPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
+
+/* a body-level portaled menu (the session/workspace dropdowns) mounts as a
+   direct fixed child: the shell crossing is the tagged surface itself, and
+   it must be normalized just the same */
+const portaledMenu = makeEl({ bg: "rgba(255, 255, 255, 0.85)", w: 218, h: 130, position: "fixed" });
+sandbox.document.body = portaledMenu;
+const scanner14 = createSurfaceScanner();
+scanner14.setTintScale(0.3);
+scanner14.add(portaledMenu);
+check("a portaled menu is normalized too", portaledMenu.style.backgroundColor, "rgba(255, 255, 255, 0.55)");
 
 /* ── nested fills are tinted, not stacked ─────────────────────────────
    A fill designed for an opaque plate only tints it. Over glass it tints AND
@@ -367,6 +426,9 @@ scanner5.setTintScale(0.3);
 scanner5.add(tintShell);
 
 check("nested fill is recorded with its original colour", row.getAttribute(TINT_ATTR), ROW_BG);
+// a nested fill with its own colour (a bubble inside the conversation sheet)
+// is a nested sheet now — every component gets the palette treatment
+check("nested fill with its own colour is tagged as a nested sheet", row.getAttribute(SHEET_ATTR), "lg");
 check("nested fill alpha is scaled", row.style.backgroundColor, "rgba(80, 90, 120, 0.24)");
 check("the surface itself is never tinted", tintPanel.hasAttribute(TINT_ATTR), false);
 
@@ -415,7 +477,7 @@ const hcShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [hov
 sandbox.document.body = hcShell;
 const scanner10 = createSurfaceScanner();
 scanner10.add(hcShell);
-check("hover card is tagged as a surface", hoverCard.getAttribute(SURFACE_ATTR), "sm");
+check("hover card is tagged as a surface", hoverCard.getAttribute(SURFACE_ATTR), "lg");
 check("hardcoded white title is rebound to the title token", hcTitle.style.color, "var(--dsh-glass-hovercard-title)");
 check("hardcoded grey time is rebound to the meta token", hcTime.style.color, "var(--dsh-glass-hovercard-meta)");
 check("hardcoded grey status is rebound to the caption token", hcStatus.style.color, "var(--dsh-glass-hovercard-caption)");
@@ -427,7 +489,7 @@ const otherShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [
 sandbox.document.body = otherShell;
 const scanner11 = createSurfaceScanner();
 scanner11.add(otherShell);
-check("an overlay not painted from the variable is tagged but untouched", otherCard.getAttribute(SURFACE_ATTR), "sm");
+check("an overlay not painted from the variable is tagged but untouched", otherCard.getAttribute(SURFACE_ATTR), "lg");
 check("its hardcoded text colour is left alone", otherTitle.style.color, "");
 
 /* ── teardown must leave no trace ─────────────────────────────────────
@@ -453,12 +515,16 @@ scanner12.add(downShell);
 check("teardown fixture: panel is a sheet", downPanel.hasAttribute(SHEET_ATTR), true);
 check("teardown fixture: row is tinted", downRow.style.backgroundColor, "rgba(80, 90, 120, 0.24)");
 check("teardown fixture: card ink is rebound", downTitle.style.color, "var(--dsh-glass-hovercard-title)");
+// the portaled card is normalized like every other float now
+check("teardown fixture: card fill is normalized", downCard.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
 
 scanner12.stop();
 check("stop() clears the sheet marker", downPanel.hasAttribute(SHEET_ATTR), false);
 check("stop() clears the surface marker", downCard.hasAttribute(SURFACE_ATTR), false);
 check("stop() restores the row's own background", downRow.style.backgroundColor, "");
 check("stop() clears the tint marker", downRow.hasAttribute(TINT_ATTR), false);
+check("stop() restores the card's own background", downCard.style.backgroundColor, "");
+check("stop() clears the card's tint marker", downCard.hasAttribute(TINT_ATTR), false);
 // the regression this pins: the var() would resolve to nothing after the
 // token layer is disposed, leaving the hover card's text unstyled
 check("stop() restores the hover card's own ink", downTitle.style.color, "");

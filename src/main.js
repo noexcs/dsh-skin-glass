@@ -62,6 +62,16 @@ const DEFAULT_TRANSLUCENCY = 0.45;
  * surfaces the detector happens to find.
  */
 const REFRACT_ID = "dsh-glass-refract";
+
+/**
+ * Turbulence-driven displacement filter. The map must be independent of
+ * element size — it is applied to whatever surfaces the detector finds —
+ * and there is deliberately ONE strength: every tagged surface gets the
+ * palette's look (the command palette was the reference effect), so no
+ * size-based gradation. The 18px displacement reads as glass thickness on
+ * a large pane; on a small menu it warps the same absolute pixels, which
+ * the user prefers over a visibly weaker effect.
+ */
 const FILTER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0">` +
   `<filter id="${REFRACT_ID}" x="-15%" y="-15%" width="130%" height="130%" color-interpolation-filters="sRGB">` +
   `<feTurbulence type="fractalNoise" baseFrequency="0.006 0.010" numOctaves="2" seed="11" result="warp"/>` +
@@ -73,12 +83,12 @@ const REFRACT_OK = typeof CSS !== "undefined" && typeof CSS.supports === "functi
   CSS.supports("backdrop-filter", `url(#${REFRACT_ID})`);
 
 /**
- * The frost itself. One value, six declarations (unprefixed + `-webkit-`,
- * across the overlay rule, the sheet pseudo and the reduced-transparency
- * reset), so it is spelled once here and emitted through {@link backdrop}.
+ * The frost itself. One value, many declarations (unprefixed + `-webkit-`,
+ * across the overlay rule, the sheet pseudo, both refraction tiers and the
+ * reduced-transparency reset), so it is spelled once here and emitted
+ * through {@link backdrop}.
  */
 const FROST = "blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)";
-const REFRACTED_FROST = `url(#${REFRACT_ID}) ${FROST}`;
 const backdrop = (value) => `-webkit-backdrop-filter:${value};backdrop-filter:${value}`;
 
 const GLASS_TAG_ID = "dsh-skin-glass/chrome.css";
@@ -124,10 +134,14 @@ const GLASS_CSS = [
   // colour is opaque, but with translucency they compound into a solid block
   // (see MERGE_ATTR)
   "html[data-dsh-glass] [data-dsh-glass-merge]{background-color:transparent}",
-  // refraction, Chromium only — the detector withholds the "lg" value entirely
-  // when the engine cannot do it, so these rules simply never match elsewhere
-  `html[data-dsh-glass] [data-dsh-glass-surface=lg]{${backdrop(REFRACTED_FROST)}}`,
-  `html[data-dsh-glass] [data-dsh-glass-sheet=lg]::before{${backdrop(REFRACTED_FROST)}}`,
+  // refraction, Chromium only. Every tagged surface gets the same filter;
+  // when the engine cannot do url() backdrop filters the detector marks
+  // surfaces "plain" instead, so these rules never match there and the base
+  // frost rule above still applies — important because an unresolvable
+  // url() would invalidate the whole backdrop-filter value, not just the
+  // one function
+  `html[data-dsh-glass] [data-dsh-glass-surface=lg]{${backdrop(`url(#${REFRACT_ID}) ${FROST}`)}}`,
+  `html[data-dsh-glass] [data-dsh-glass-sheet=lg]::before{${backdrop(`url(#${REFRACT_ID}) ${FROST}`)}}`,
   // honour the OS "reduce transparency" setting (translucency is also forced
   // to its most legible end from JS, which can reach the token layer)
   "@media (prefers-reduced-transparency: reduce){",
@@ -166,17 +180,20 @@ function ensureFilterHost() {
 
    So the question is asked of the rendered result instead: an element whose
    *computed* background-color is translucent is a glass surface, whichever
-   class it happens to carry this build. Tagging stops at the first match so
-   only the outermost surface is marked — nesting backdrop-filters would
-   compound the blur into mud and multiply the cost — but descent continues,
-   because a fixed-position overlay nested inside glass is exactly what has
-   to be found (see unglassAncestors).
+   class it happens to carry this build. Every surface gets the palette
+   treatment, nested or not — the only exception is a fill that *repeats the
+   parent surface's own colour*, which is merged instead of tagged (tagging
+   it would re-introduce the opacity compounding the merge rule exists to
+   prevent). Descent always continues, because a fixed-position overlay
+   nested inside glass is exactly what has to be found (see
+   unglassAncestors).
 
    The marker comes in two kinds (see tagSurface): overlays (fixed/absolute,
    and in-flow panels nested inside an overlay shell) get
    `data-dsh-glass-surface`, which carries the backdrop-filter directly;
-   top-level in-flow sheets get `data-dsh-glass-sheet`, whose frost lives on
-   a `::before` pseudo instead — the sheet itself never becomes a containing
+   in-flow sheets (columns, cards, rows — top-level *or nested inside
+   another sheet*) get `data-dsh-glass-sheet`, whose frost lives on a
+   `::before` pseudo instead — the sheet itself never becomes a containing
    block, so a hover tooltip (an inline-rendered `position: fixed` bubble)
    is neither re-anchored nor triggers any glass stripping on mount. Both
    markers feed the nested-fill normalization (merge/tint). */
@@ -226,8 +243,6 @@ const SURFACE_MIN_ALPHA = 0.2;
 const SURFACE_MAX_ALPHA = 0.995;
 const SURFACE_MIN_W = 44;
 const SURFACE_MIN_H = 24;
-/** Refraction is reserved for surfaces big enough for the distortion to read. */
-const REFRACT_MIN_AREA = 45000;
 /** Elements processed per idle slice, so a long conversation cannot stall. */
 const SCAN_BUDGET = 2500;
 
@@ -248,12 +263,15 @@ function alphaOf(color) {
 }
 
 /**
- * Repaint a nested fill at a fraction of its alpha, so it tints the glass
- * instead of thickening it. Written as an inline style because the value is
+ * Repaint a fill at a fraction of its alpha, so it tints the glass instead
+ * of thickening it. Written as an inline style because the value is
  * per-element; the original colour rides along in the attribute so the next
  * pass can tell "already scaled" from "needs scaling".
+ * @param floor - the scaled alpha may not drop below this; nested fills pass
+ *   0 (the stack under them already carries the floor), a float's own fill
+ *   passes {@link glassColor.floatTintFloor} so its text stays legible.
  */
-function scaleNestedTint(el, bg, scale) {
+function scaleNestedTint(el, bg, scale, floor) {
   if (scale >= 1) return;
   if (el.hasAttribute(TINT_ATTR)) return;      // already ours; never compound
   // a background the product set inline is not ours to rewrite
@@ -261,7 +279,7 @@ function scaleNestedTint(el, bg, scale) {
   const parsed = parseColor(bg);
   if (parsed === null || parsed.a <= 0 || parsed.a >= 1) return;
   el.setAttribute(TINT_ATTR, bg);
-  const scaled = Math.round(parsed.a * scale * 1000) / 1000;
+  const scaled = Math.round(Math.max(floor, parsed.a * scale) * 1000) / 1000;
   el.style.setProperty("background-color", `rgba(${parsed.rgb.join(", ")}, ${scaled})`);
 }
 
@@ -395,24 +413,28 @@ function tagSurface(el, suspended, computed) {
   // which is already blurred — it would pay the largest backdrop cost in the
   // app for no visible gain. Skip it, but keep descending.
   if (rect.width >= innerWidth * 0.92 && rect.height >= innerHeight * 0.92) return false;
-  const large = rect.width * rect.height >= REFRACT_MIN_AREA;
-  const tier = large && REFRACT_OK ? "lg" : "sm";
+  // Every tagged surface refracts with the same filter; "plain" withholds
+  // the url() entirely where the engine cannot run it (see REFRACT_OK).
+  const tier = REFRACT_OK ? "lg" : "plain";
   // Out-of-flow overlays sit over app content and take the filter directly.
   if (isOutOfFlow(cs)) {
     el.setAttribute(SURFACE_ATTR, tier);
     return true;
   }
-  // In-flow element. Inside an already-marked glass region it belongs to the
-  // outer marker. Inside a fixed/absolute overlay wrapper whose own box is
-  // transparent (the settings dialog's shell), its backdrop is *app content*,
-  // so it needs the real filter too — a pseudo would be buried under the
-  // overlay's mask and lose the frost. Only top-level in-flow sheets
-  // (columns, cards) get the pseudo frost, which keeps the sheet from being
-  // the containing block for the inline fixed tooltip bubbles inside it.
+  // In-flow element. Every surface gets the palette treatment, nested or
+  // not: inside an already-marked glass region it still gets its own sheet
+  // pseudo — the pseudo carries the frost, so the outer sheet remains a
+  // plain containing block for the inline fixed tooltip bubbles inside it.
+  // (The walk only skips tagging for a fill that *repeats the parent
+  // surface's own colour* — the merge rule — because tagging those would
+  // re-introduce the opacity compounding the merge exists to prevent.)
+  // Inside a fixed/absolute overlay wrapper whose own box is transparent
+  // (the settings dialog's shell), the backdrop is *app content*, so the
+  // element needs the real filter — a pseudo would be buried under the
+  // overlay's mask and lose the frost.
   let p = el.parentElement;
   for (let i = 0; p !== null && i < ANCESTOR_SCAN; i++) {
-    if (isGlassRegion(p)) return false;
-    if (isOutOfFlow(getComputedStyle(p))) {
+    if (isOutOfFlow(getComputedStyle(p)) && !isGlassRegion(p)) {
       el.setAttribute(SURFACE_ATTR, tier);
       return true;
     }
@@ -483,10 +505,18 @@ function createSurfaceScanner() {
         released.add(ancestor);
       }
     }
-    for (const ancestor of released) push(ancestor, false, null);
+    for (const ancestor of released) push(ancestor, false, null, false);
   };
 
-  const push = (el, inGlass, surfaceColor) => queue.push({ el, inGlass, surfaceColor });
+  /**
+   * Entries are { el, inGlass, surfaceColor, tintCtx }: `inGlass` suppresses
+   * tagging (not descent), `surfaceColor` is the nearest painted background
+   * above, against which repeats are detected, and `tintCtx` marks a subtree
+   * whose fills are normalized by {@link glassColor.nestedTintScale} even
+   * though the walk is not inside a marked glass region.
+   */
+  const push = (el, inGlass, surfaceColor, tintCtx) =>
+    queue.push({ el, inGlass, surfaceColor, tintCtx });
 
   const drain = () => {
     scheduled = false;
@@ -498,6 +528,7 @@ function createSurfaceScanner() {
       const el = entry.el;
       let inGlass = entry.inGlass;
       let surfaceColor = entry.surfaceColor;
+      let tintCtx = entry.tintCtx === true;
       budget -= 1;
       if (!el.isConnected) continue;
       const cs = getComputedStyle(el);
@@ -508,19 +539,33 @@ function createSurfaceScanner() {
         suspend(el);
       }
       // An out-of-flow shell that is not itself glass (the settings dialog's
-      // transparent fixed wrapper, an unmarked absolute container) takes its
+      // transparent fixed wrapper, a body-level portal root) takes its
       // content OFF the sheet's backdrop: reset the glass context so panels
       // inside it get their own marker instead of being suppressed as nested
       // fills — otherwise a retag while the dialog is open would strip the
-      // panel's frost for good.
+      // panel's frost for good. It also starts a *tint context*: the panels
+      // inside mount over app content rather than wallpaper, and their fill
+      // is normalized like a nested fill's, so a dialog's surface reads the
+      // same translucency as a palette mounted inside a sheet region instead
+      // of keeping its full token alpha (the 0.85-vs-0.58 split the skin
+      // used to show).
       if (isOutOfFlow(cs) && !isGlassRegion(el)) {
         inGlass = false;
         surfaceColor = null;
+        tintCtx = true;
       }
+      // an element we already tinted reports its scaled colour, so recover the
+      // original for both the repeat test and what children compare against
+      const tinted = el.getAttribute(TINT_ATTR);
+      const bg = tinted !== null ? tinted : cs.backgroundColor;
+      // a fill that *repeats the parent surface's own colour* is merged
+      // rather than tagged: tagging it would re-introduce the opacity
+      // compounding the merge rule exists to prevent (the trajectory panel)
+      const repeats = inGlass && surfaceColor !== null && bg === surfaceColor;
       // Descent continues past a glass surface even though tagging stops:
       // pruning would be cheaper, but a fixed-position overlay nested inside
       // glass is exactly what has to be found, and pruning would hide it.
-      const tagged = !inGlass && tagSurface(el, suspended, cs);
+      const tagged = !repeats && tagSurface(el, suspended, cs);
       // the hover card paints its background from --dsw-hovercard-bg (its only
       // consumer); once tagged as a glass surface, its hardcoded light-on-dark
       // text palette is rebound to the per-mode hovercard tokens, so light mode
@@ -528,30 +573,31 @@ function createSurfaceScanner() {
       if (tagged && isOutOfFlow(cs) && paintsHovercardBg(el, cs)) {
         treatHovercardText(el);
       }
-      // an element we already tinted reports its scaled colour, so recover the
-      // original for both the repeat test and what children compare against
-      const tinted = el.getAttribute(TINT_ATTR);
-      const bg = tinted !== null ? tinted : cs.backgroundColor;
       // A walk that starts outside the glass context (the mutation observer's
       // add()) still tints nested fills when the element sits inside a marked
       // glass region — otherwise a dialog panel mounted inside the sidebar's
       // sheet region would compound to opacity. Bounded like tagSurface's own
-      // ancestor scan, and skipped entirely when the walk is already inside
-      // glass or the element paints nothing.
-      const inRegion = () => inGlass || hasAncestor(el, ANCESTOR_SCAN, isGlassRegion);
+      // ancestor scan. The tint context covers the same need for subtrees the
+      // walk entered through an unmarked out-of-flow shell.
+      const inTintCtx = () => tintCtx || inGlass || hasAncestor(el, ANCESTOR_SCAN, isGlassRegion);
       let childColor = surfaceColor;
       if (tagged) {
-        if (inRegion()) scaleNestedTint(el, bg, tintScale);
+        // A float's own fill is scaled toward the nested tint with the float
+        // floor (its backdrop is wallpaper/app content); a surface nested
+        // inside glass keeps the plain nested scale — the stack under it
+        // already carries the legibility floor.
+        const floor = inGlass ? 0 : glassColor.floatTintFloor;
+        if (inTintCtx()) scaleNestedTint(el, bg, tintScale, floor);
         childColor = bg;
-      } else if (inGlass && surfaceColor !== null && bg === surfaceColor) {
+      } else if (repeats) {
         el.setAttribute(MERGE_ATTR, "");   // repeat of the surface's own colour
       } else if (alphaOf(bg) > 0) {
         // a new painted layer: tint it rather than let it add opacity, and
         // make it the reference its own children compare against
-        if (inRegion()) scaleNestedTint(el, bg, tintScale);
+        if (inTintCtx()) scaleNestedTint(el, bg, tintScale, 0);
         childColor = bg;
       }
-      for (const child of el.children) push(child, inGlass || tagged, childColor);
+      for (const child of el.children) push(child, inGlass || tagged, childColor, tintCtx || tagged);
     }
     if (queue.length > 0) schedule();
   };
@@ -589,7 +635,7 @@ function createSurfaceScanner() {
     /** Queue a subtree for tagging. */
     add(root) {
       if (stopped || root.nodeType !== 1) return;
-      push(root, false, null);
+      push(root, false, null, false);
       schedule();
     },
     /**
@@ -617,7 +663,7 @@ function createSurfaceScanner() {
       if (stopped) return;
       stripTags();
       queue = [];
-      push(document.body, false, null);
+      push(document.body, false, null, false);
       schedule();
     },
     /** Drop every tag and go idle, without retiring the scanner. */

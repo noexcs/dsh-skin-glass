@@ -93,6 +93,11 @@ function contrast(fg, bg) {
  * the browser will actually paint: parent at full alpha, then this one
  * scaled. Grading it standalone would model a composite that never occurs.
  *
+ * Top-level floats without a parent (dialogs, menus, toasts) are normalized
+ * by the detector too — the modal-shell tint context scales every tagged
+ * float's fill, so the browser never paints them at the token alpha either.
+ * They are graded at the scaled value below, not the token value.
+ *
  * Surfaces that appear in both roles are listed twice.
  */
 const READING_SURFACES = [
@@ -136,6 +141,14 @@ function evaluate(tokens, surface, mode, patch, t) {
   if (surface.parent !== undefined) {
     backdrop = over(tokens[surface.parent][mode], backdrop);
     fill = scaleAlpha(fill, glassColor.nestedTintScale(t));
+  } else if (!FLOOR_EXEMPT.has(surface.token)) {
+    // top-level floats are normalized by the detector's tint context, then
+    // floored so their text stays legible on hostile wallpapers
+    fill = scaleAlpha(fill, glassColor.nestedTintScale(t));
+    const c = parse(fill);
+    if (c.a < glassColor.floatTintFloor) {
+      fill = `rgba(${c.rgb.join(", ")}, ${glassColor.floatTintFloor})`;
+    }
   }
   return contrast(text, over(fill, backdrop));
 }

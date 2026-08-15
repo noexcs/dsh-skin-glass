@@ -69,6 +69,7 @@ function boot({ storage = null } = {}) {
       pickAccent: () => [0, 0, 0],
       analyzeWallpaper: () => ({ meanL: 0.5, stdL: 0.1 }),
       nestedTintScale: () => 1,
+      floatTintFloor: 0.55,
       buildTokens: (accent) => { built.push(accent); return {}; }
     },
     CSS: { supports: () => false },

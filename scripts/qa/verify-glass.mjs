@@ -273,7 +273,7 @@ async function phase(name, serveOld, prefix) {
     console.log("  hover card:", JSON.stringify(card));
     verdict(card.found, "session hover card appears on dwell");
     if (card.found) {
-      verdict(card.surface === "sm", "hover card is a tagged glass surface", `surface=${card.surface}`);
+      verdict(card.surface === "lg", "hover card is a tagged glass surface", `surface=${card.surface}`);
       verdict(card.bgA > 0 && card.bgA < 1, "hover card background is translucent", `bg=${card.bg}`);
       verdict(
         card.light ? card.bg.startsWith("rgba(246, 247, 252,") : card.bg.startsWith("rgba(26, 33, 56,"),

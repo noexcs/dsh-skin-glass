@@ -61,6 +61,16 @@ function tune(rgb, lightness, saturation) {
   return hslToRgb(h, saturation === undefined ? s : Math.max(s, saturation), lightness);
 }
 
+/**
+ * Mix toward the accent but re-light the result to the base's own
+ * lightness. A dark plate keeps its depth (and its text contrast) while
+ * only taking the accent's hue — a plain RGB mix toward a bright accent
+ * (cyan) lightens the plate enough to drop white-on-dark contrast below AA.
+ */
+function mixL(base, accent, amt) {
+  return tune(mix(base, accent, amt), rgbToHsl(base[0], base[1], base[2])[2]);
+}
+
 /** "r, g, b" component string. */
 function rgbStr(rgb) {
   return `${rgb[0]}, ${rgb[1]}, ${rgb[2]}`;
@@ -215,6 +225,20 @@ const pair = (light, dark) => ({ light, dark });
 function nestedTintScale(t) {
   return 1 - 0.7 * clampT(t);
 }
+
+/**
+ * Floor for a *float's own* fill once it has been scaled toward the nested
+ * tint (the modal-shell tint context). Nested fills keep the full scale —
+ * their job is to stop compounding, and the stack under them already carries
+ * the legibility floor — but a standalone float's backdrop is wallpaper and
+ * app content, so its fill may not drop below this or its text stops
+ * clearing AA on hostile wallpapers (pinned by scripts/check-contrast.mjs).
+ * At the default translucency (0.45) the scaled alpha is 0.58, which sits
+ * above the floor: every float lands on the palette's original look
+ * unchanged, and the floor only engages at the see-through end of the
+ * slider.
+ */
+const FLOAT_TINT_FLOOR = 0.55;
 
 /**
  * Build the { light, dark } token pair table for the glass skin from one
@@ -385,7 +409,7 @@ function buildTokens(accent, options = {}) {
     /* tier C — floating reading surfaces (dialogs, menus, overlays) */
     "--dsw-alias-bg-layer-2": pair(rgba(PAPER, aTop), rgba(mix(NAVY, a, 0.08), aTop)),
     "--dsw-alias-bg-layer-3": pair(rgba(WHITE, aTop), rgba(mix(NAVY2, a, 0.14), aTop)),
-    "--dsw-alias-bg-overlay": pair(rgba(mix(WHITE, a, 0.14), aTop), rgba(mix(NAVY2, a, 0.26), aTop)),
+    "--dsw-alias-bg-overlay": pair(rgba(mix(WHITE, a, 0.14), aTop), rgba(mixL(NAVY2, a, 0.26), aTop)),
     "--dsw-specific-menu": pair(rgba(WHITE, aTop), rgba([26, 33, 56], aTop)),
     "--dsw-alias-toast-bg": pair(rgba([24, 28, 38], aTop), rgba([26, 33, 56], aTop)),
     "--dsw-alias-tooltip-bg": pair(rgba([24, 28, 38], aTop), rgba([26, 33, 56], aTop)),
@@ -447,6 +471,7 @@ const glassColor = {
   pickAccent,
   analyzeWallpaper,
   nestedTintScale,
+  floatTintFloor: FLOAT_TINT_FLOOR,
   buildTokens
 };
 

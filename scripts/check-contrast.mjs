@@ -54,14 +54,8 @@ function extremes(profile) {
   ].map((l) => [l * 255, l * 255, l * 255]);
 }
 
-/** Parse "rgba(r, g, b, a)" / "rgb(r, g, b)" into { rgb, a }. */
-function parse(value) {
-  const m = /^rgba?\(([^)]+)\)$/.exec(value.trim());
-  if (m === null) return null;
-  const parts = m[1].split(",").map((s) => Number(s.trim()));
-  if (parts.slice(0, 3).some((n) => !Number.isFinite(n))) return null;
-  return { rgb: parts.slice(0, 3), a: parts.length > 3 ? parts[3] : 1 };
-}
+/** The shared parser from src/color.cjs — one implementation, not two. */
+const parse = glassColor.parseColor;
 
 /** Paint `src` (with its alpha) over the opaque `dst`. */
 function over(src, dst) {

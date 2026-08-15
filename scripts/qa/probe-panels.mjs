@@ -5,8 +5,9 @@
  *
  * This answers "why does the command palette look different from that dialog":
  * the palette and the dialog go through the same detector, so any visual
- * difference is one of a small number of decisions (tier, marker kind, token
- * the surface paints from, suppression inside an outer marked region).
+ * difference is one of a small number of decisions (marker kind, tier, the
+ * token the surface paints from). The probe drives the REAL classifier via
+ * window.__dshGlass (exported by the bundle) — no hand copy to drift.
  *
  * Usage — drive the UI with a step script, dumping after each step:
  *   node scripts/qa/probe-panels.mjs --steps '[{"key":"Meta+k"}]'
@@ -16,74 +17,30 @@
  *
  * Dependencies: see verify-glass.mjs (playwright-core, chromium headless shell).
  */
-import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-const here = dirname(fileURLToPath(import.meta.url));
+import { resolvePlaywright, findChromium, newGlassPage } from "./shared.mjs";
 
 const ARGS = {};
 for (let i = 2; i < process.argv.length; i++) {
   const k = process.argv[i];
   if (k.startsWith("--")) ARGS[k.slice(2)] = process.argv[++i];
 }
-const GUI_URL = process.env.DSH_WEB_URL || "http://127.0.0.1:3080/";
 const STEPS = ARGS.steps ? JSON.parse(ARGS.steps) : [];
 
-function resolvePlaywright() {
-  for (const dir of [
-    "/tmp/dsh-glass-qa/node_modules/playwright-core",
-    "/tmp/dsh-glass-repro/node_modules/playwright-core",
-    join(here, "..", "..", "node_modules", "playwright-core")
-  ]) {
-    try { return require(dir); } catch { /* keep looking */ }
-  }
-  return null;
-}
 const playwright = resolvePlaywright();
 if (playwright === null) {
   console.error("playwright-core not found — see verify-glass.mjs header.");
   process.exit(1);
 }
 const { chromium } = playwright;
-
-function findChromium() {
-  const cache = join(process.env.HOME || "~", "Library", "Caches", "ms-playwright");
-  if (!existsSync(cache)) return null;
-  for (const entry of readdirSync(cache)) {
-    if (!entry.startsWith("chromium")) continue;
-    for (const rel of [["chrome-mac", "headless_shell"], ["chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"]]) {
-      const exe = join(cache, entry, ...rel);
-      if (existsSync(exe)) return exe;
-    }
-  }
-  return null;
-}
 const EXE = findChromium();
-
-/* a 2×2 wallpaper so the skin is active without shipping an asset */
-const DATA_URL = "data:image/svg+xml;base64," + Buffer.from(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">' +
-  '<rect width="8" height="8" fill="#3a5fa0"/><rect width="4" height="4" fill="#c08a3e"/></svg>'
-).toString("base64");
 
 /* ── in-page probe ─────────────────────────────────────────────────── */
 
-/**
- * Replicates the detector's decisions per element and explains the outcome.
- * Kept in sync with src/main.js tagSurface() by hand — it is a diagnostic,
- * not a test, so drift shows up as a confusing report rather than a false pass.
- */
 function probe() {
-  const MIN_A = 0.2, MAX_A = 0.995, MIN_W = 44, MIN_H = 24, REFRACT_AREA = 45000, SCAN = 12;
-  const alpha = (c) => {
-    const m = /^rgba?\(([^)]+)\)$/.exec(c);
-    if (!m) return 1;
-    const p = m[1].split(",");
-    return p.length > 3 ? Number(p[3]) : 1;
-  };
+  const G = window.__dshGlass;
+  if (!G) {
+    return [{ cls: "(no __dshGlass handle)", why: "the loaded bundle predates the debug export — rebuild lib/client.js" }];
+  }
 
   // every --dsw-*/--dsh-* the skin pushed onto body, so a panel's fill can be
   // traced back to the token it consumes
@@ -101,59 +58,54 @@ function probe() {
     return hits.length ? hits.join(",") : null;
   };
 
-  const isOut = (cs) => cs.position === "fixed" || cs.position === "absolute";
-  const marked = (el) => el.hasAttribute("data-dsh-glass-surface") || el.hasAttribute("data-dsh-glass-sheet");
-
   // candidates: anything out-of-flow and visible, plus anything already marked
-  const all = Array.from(document.querySelectorAll("body *"));
   const out = [];
-  for (const el of all) {
+  for (const el of document.querySelectorAll("body *")) {
     const cs = getComputedStyle(el);
     const r = el.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) continue;
-    const outOfFlow = isOut(cs);
-    if (!outOfFlow && !marked(el)) continue;
+    const marked = el.hasAttribute(G.SURFACE_ATTR) || el.hasAttribute(G.SHEET_ATTR);
+    if (!G.isOutOfFlow(cs) && !marked) continue;
 
-    const a = alpha(cs.backgroundColor);
-    const area = r.width * r.height;
-    const surface = el.getAttribute("data-dsh-glass-surface");
-    const sheet = el.getAttribute("data-dsh-glass-sheet");
+    const decision = G.decideSurface(el, cs);
+    const surface = el.getAttribute(G.SURFACE_ATTR);
+    const sheet = el.getAttribute(G.SHEET_ATTR);
+    const actual = surface ? `surface=${surface}` : sheet ? `sheet=${sheet}` : null;
 
-    // why was it not tagged?
+    // why is the element not tagged the way the classifier would have it?
     let why = null;
-    if (!surface && !sheet) {
-      if (a < MIN_A) why = `bg alpha ${a} < ${MIN_A} (reads as a hover tint, not a surface)`;
-      else if (a > MAX_A) why = `bg alpha ${a} > ${MAX_A} (OPAQUE — token not overridden by the skin?)`;
-      else if (r.width < MIN_W || r.height < MIN_H) why = `too small ${Math.round(r.width)}x${Math.round(r.height)}`;
+    if (decision === null) {
+      const a = G.alphaOf(cs.backgroundColor);
+      if (a < G.SURFACE_MIN_ALPHA) why = `bg alpha ${a} < ${G.SURFACE_MIN_ALPHA} (reads as a hover tint, not a surface)`;
+      else if (a > G.SURFACE_MAX_ALPHA) why = `bg alpha ${a} > ${G.SURFACE_MAX_ALPHA} (OPAQUE — token not overridden by the skin?)`;
+      else if (r.width < G.SURFACE_MIN_W || r.height < G.SURFACE_MIN_H) why = `too small ${Math.round(r.width)}x${Math.round(r.height)}`;
       else if (r.width >= innerWidth * 0.92 && r.height >= innerHeight * 0.92) why = "viewport-filling (skipped by design)";
-      else {
-        let p = el.parentElement, hit = null;
-        for (let i = 0; p && i < SCAN; i++) {
-          if (marked(p)) { hit = String(p.className).slice(0, 28) || p.tagName; break; }
-          p = p.parentElement;
-        }
-        why = hit ? `suppressed: inside marked region <${hit}>` : "unknown";
-      }
+      else why = "unknown";
+    } else if (actual === null) {
+      // the classifier would tag it but the walk has not: a fill repeating
+      // the parent surface colour is merged instead of tagged
+      why = "classifier says glass, but not tagged (merge rule or scanner pending)";
+    } else if (decision.kind === "sheet" && surface !== null) {
+      why = `classified as sheet, but carries a direct surface marker`;
     }
 
     out.push({
       cls: String(el.className).slice(0, 34) || el.tagName,
       pos: cs.position,
       box: `${Math.round(r.width)}x${Math.round(r.height)}`,
-      area: Math.round(area),
+      area: Math.round(r.width * r.height),
       bg: cs.backgroundColor,
-      a: Math.round(a * 1000) / 1000,
+      a: Math.round(G.alphaOf(cs.backgroundColor) * 1000) / 1000,
       token: tokenOf(cs.backgroundColor),
-      mark: surface ? `surface=${surface}` : sheet ? `sheet=${sheet}` : null,
-      tier: surface || sheet || null,
-      wouldBe: area >= REFRACT_AREA ? "lg" : "sm",
+      mark: actual,
+      tier: decision ? `${decision.kind}/${decision.tier}` : null,
       bf: cs.backdropFilter === "none" ? null : cs.backdropFilter.slice(0, 46),
       bfBefore: (() => {
         const v = getComputedStyle(el, "::before").backdropFilter;
         return v && v !== "none" ? v.slice(0, 46) : null;
       })(),
-      tint: el.hasAttribute("data-dsh-glass-tint") || undefined,
-      merge: el.hasAttribute("data-dsh-glass-merge") || undefined,
+      tint: el.hasAttribute(G.TINT_ATTR) || undefined,
+      merge: el.hasAttribute(G.MERGE_ATTR) || undefined,
       why
     });
   }
@@ -180,14 +132,7 @@ function fmt(rows) {
 /* ── drive ─────────────────────────────────────────────────────────── */
 
 const browser = await chromium.launch(EXE ? { executablePath: EXE, headless: true } : { headless: true });
-const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
-const page = await ctx.newPage();
-await page.goto(GUI_URL, { waitUntil: "domcontentloaded" });
-await page.evaluate((img) => localStorage.setItem("dsh-skin-glass:v1",
-  JSON.stringify({ image: img, blur: 18, translucency: 0.45 })), DATA_URL);
-await page.reload({ waitUntil: "domcontentloaded" });
-await page.waitForSelector("html[data-dsh-glass]", { timeout: 20000 });
-await page.waitForTimeout(2500);
+const page = await newGlassPage(browser, { settleMs: 2500 });
 
 console.log("=== baseline ===");
 console.log(fmt(await page.evaluate(probe)));

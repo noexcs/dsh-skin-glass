@@ -246,21 +246,9 @@ const SURFACE_MIN_H = 24;
 /** Elements processed per idle slice, so a long conversation cannot stall. */
 const SCAN_BUDGET = 2500;
 
-/** Split "rgba(r, g, b, a)" / "rgb(r, g, b)" into numbers, or null. */
-function parseColor(color) {
-  const m = /^rgba?\(([^)]+)\)$/.exec(color);
-  if (m === null) return null;
-  const parts = m[1].split(",").map((s) => Number(s.trim()));
-  if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n))) return null;
-  const a = parts.length > 3 ? parts[3] : 1;
-  return { rgb: parts.slice(0, 3), a: Number.isFinite(a) ? a : 1 };
-}
-
-/** Alpha of a computed colour; anything unparseable counts as opaque. */
-function alphaOf(color) {
-  const parsed = parseColor(color);
-  return parsed === null ? 1 : parsed.a;
-}
+/* Computed-colour parsing lives in src/color.cjs — referenced through
+   `glassColor` (never a top-level alias) because the bundle inlines
+   color.cjs into the same scope as this file. */
 
 /**
  * Repaint a fill at a fraction of its alpha, so it tints the glass instead
@@ -276,7 +264,7 @@ function scaleNestedTint(el, bg, scale, floor) {
   if (el.hasAttribute(TINT_ATTR)) return;      // already ours; never compound
   // a background the product set inline is not ours to rewrite
   if (el.style.backgroundColor !== "") return;
-  const parsed = parseColor(bg);
+  const parsed = glassColor.parseColor(bg);
   if (parsed === null || parsed.a <= 0 || parsed.a >= 1) return;
   el.setAttribute(TINT_ATTR, bg);
   const scaled = Math.round(Math.max(floor, parsed.a * scale) * 1000) / 1000;
@@ -309,8 +297,8 @@ const HOVERCARD_TEXT_MAP = [
 const round2 = (x) => Math.round(x * 100) / 100;
 
 function paintsHovercardBg(el, cs) {
-  const own = parseColor(cs.backgroundColor);
-  const ref = parseColor(cs.getPropertyValue(HOVERCARD_VAR));
+  const own = glassColor.parseColor(cs.backgroundColor);
+  const ref = glassColor.parseColor(cs.getPropertyValue(HOVERCARD_VAR));
   if (own === null || ref === null || ref.a <= 0) return false;
   return round2(own.a) === round2(ref.a) && own.rgb.every((v, i) => v === ref.rgb[i]);
 }
@@ -402,25 +390,27 @@ function unglassAncestors(el) {
  * @param computed - reuse of the caller's getComputedStyle, when it has one.
  * @returns true when tagged, which tells the caller to stop descending.
  */
-function tagSurface(el, suspended, computed) {
-  if (suspended !== undefined && suspended.has(el)) return false;
-  const cs = computed !== undefined ? computed : getComputedStyle(el);
-  const alpha = alphaOf(cs.backgroundColor);
-  if (!(alpha >= SURFACE_MIN_ALPHA && alpha <= SURFACE_MAX_ALPHA)) return false;
+/**
+ * Classify one element as a glass surface, WITHOUT writing any attribute.
+ * Pure so the QA probe (scripts/qa/probe-panels.mjs) can drive the exact
+ * same classifier the scanner uses instead of maintaining a hand copy —
+ * that copy had already drifted (stale tiering and suppression rules).
+ * @returns { kind: "surface" | "sheet", tier: string } | null
+ */
+function decideSurface(el, cs) {
+  const alpha = glassColor.alphaOf(cs.backgroundColor);
+  if (!(alpha >= SURFACE_MIN_ALPHA && alpha <= SURFACE_MAX_ALPHA)) return null;
   const rect = el.getBoundingClientRect();
-  if (rect.width < SURFACE_MIN_W || rect.height < SURFACE_MIN_H) return false;
+  if (rect.width < SURFACE_MIN_W || rect.height < SURFACE_MIN_H) return null;
   // A surface that fills the viewport has nothing behind it but the wallpaper,
   // which is already blurred — it would pay the largest backdrop cost in the
   // app for no visible gain. Skip it, but keep descending.
-  if (rect.width >= innerWidth * 0.92 && rect.height >= innerHeight * 0.92) return false;
+  if (rect.width >= innerWidth * 0.92 && rect.height >= innerHeight * 0.92) return null;
   // Every tagged surface refracts with the same filter; "plain" withholds
   // the url() entirely where the engine cannot run it (see REFRACT_OK).
   const tier = REFRACT_OK ? "lg" : "plain";
   // Out-of-flow overlays sit over app content and take the filter directly.
-  if (isOutOfFlow(cs)) {
-    el.setAttribute(SURFACE_ATTR, tier);
-    return true;
-  }
+  if (isOutOfFlow(cs)) return { kind: "surface", tier };
   // In-flow element. Every surface gets the palette treatment, nested or
   // not: inside an already-marked glass region it still gets its own sheet
   // pseudo — the pseudo carries the frost, so the outer sheet remains a
@@ -435,12 +425,27 @@ function tagSurface(el, suspended, computed) {
   let p = el.parentElement;
   for (let i = 0; p !== null && i < ANCESTOR_SCAN; i++) {
     if (isOutOfFlow(getComputedStyle(p)) && !isGlassRegion(p)) {
-      el.setAttribute(SURFACE_ATTR, tier);
-      return true;
+      return { kind: "surface", tier };
     }
     p = p.parentElement;
   }
-  el.setAttribute(SHEET_ATTR, tier);
+  return { kind: "sheet", tier };
+}
+
+/**
+ * Tag one element if it is a glass surface: {@link decideSurface} plus the
+ * attribute write, gated on the suspension set.
+ * @param suspended - elements currently holding a fixed-position overlay,
+ *   for which glass is on hold (see {@link unglassAncestors}).
+ * @param computed - reuse of the caller's getComputedStyle, when it has one.
+ * @returns true when tagged, which tells the caller the element is a surface.
+ */
+function tagSurface(el, suspended, computed) {
+  if (suspended !== undefined && suspended.has(el)) return false;
+  const cs = computed !== undefined ? computed : getComputedStyle(el);
+  const decision = decideSurface(el, cs);
+  if (decision === null) return false;
+  el.setAttribute(decision.kind === "surface" ? SURFACE_ATTR : SHEET_ATTR, decision.tier);
   return true;
 }
 
@@ -591,7 +596,7 @@ function createSurfaceScanner() {
         childColor = bg;
       } else if (repeats) {
         el.setAttribute(MERGE_ATTR, "");   // repeat of the surface's own colour
-      } else if (alphaOf(bg) > 0) {
+      } else if (glassColor.alphaOf(bg) > 0) {
         // a new painted layer: tint it rather than let it add opacity, and
         // make it the reference its own children compare against
         if (inTintCtx()) scaleNestedTint(el, bg, tintScale, 0);
@@ -692,33 +697,61 @@ function loadImage(src) {
   });
 }
 
-/** Downscale a picked file to a data URL (max 1920px, alpha flattened). */
-async function processImageFile(file) {
-  const url = URL.createObjectURL(file);
-  let img;
-  try {
-    img = await loadImage(url);
-  } finally {
-    // revoked whether the decode resolved or threw: on the success path the
-    // bitmap is already decoded and no longer needs the blob URL
-    URL.revokeObjectURL(url);
-  }
-  const scale = Math.min(1, MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight));
-  const w = Math.max(1, Math.round(img.naturalWidth * scale));
-  const h = Math.max(1, Math.round(img.naturalHeight * scale));
+/**
+ * Paint an image source onto a white-flattened w×h canvas and encode it:
+ * webp where the engine supports it, JPEG otherwise.
+ */
+function encodeImage(source, w, h) {
   const canvas = document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
   const g = canvas.getContext("2d");
   g.fillStyle = "#ffffff";
   g.fillRect(0, 0, w, h);
-  g.drawImage(img, 0, 0, w, h);
+  g.drawImage(source, 0, 0, w, h);
   // An unsupported type is not an error: toDataURL *silently* falls back to
   // PNG, so asking for webp and catching a throw would never fire — and a
   // 1920px PNG is several MB, which is what blows the localStorage quota.
   // Detect by what came back, and fall through to JPEG instead.
   const webp = canvas.toDataURL("image/webp", 0.88);
   return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/jpeg", 0.88);
+}
+
+/** Downscale a picked file to a data URL (max 1920px, alpha flattened). */
+async function processImageFile(file) {
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(file);
+    try {
+      const scale = Math.min(1, MAX_DIM / Math.max(bitmap.width, bitmap.height));
+      const w = Math.max(1, Math.round(bitmap.width * scale));
+      const h = Math.max(1, Math.round(bitmap.height * scale));
+      const resized = bitmap.width === w && bitmap.height === h
+        ? bitmap
+        : await createImageBitmap(bitmap, { resizeWidth: w, resizeHeight: h });
+      try {
+        // explicit w/h on drawImage: even if the engine ignored the resize
+        // options, the canvas still downsamples to the exact target size
+        return encodeImage(resized, w, h);
+      } finally {
+        if (resized !== bitmap) resized.close();
+      }
+    } finally {
+      bitmap.close();
+    }
+  }
+  // engines without createImageBitmap: the blob-URL decode path
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await loadImage(url);
+    const scale = Math.min(1, MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    return encodeImage(img, w, h);
+  } finally {
+    // revoked whether the decode resolved or threw: on the success path the
+    // bitmap is already decoded and no longer needs the blob URL
+    URL.revokeObjectURL(url);
+  }
 }
 
 /** Sample the image into a small [r,g,b] array for quantization. */
@@ -1096,6 +1129,35 @@ function apply(ctx) {
       };
     }
   }, GlassRow));
+}
+
+/* ── QA debug handle ─────────────────────────────────────────────────
+   The live probe (scripts/qa/probe-panels.mjs) drives the REAL classifier
+   through this instead of maintaining a hand copy that drifts. The sandbox
+   harnesses evaluate this file without a `window`, so the guard keeps them
+   unaffected. */
+if (typeof window !== "undefined") {
+  window.__dshGlass = {
+    decideSurface,
+    tagSurface,
+    createSurfaceScanner,
+    parseColor: glassColor.parseColor,
+    alphaOf: glassColor.alphaOf,
+    SURFACE_ATTR,
+    SHEET_ATTR,
+    MERGE_ATTR,
+    TINT_ATTR,
+    INK_ATTR,
+    SURFACE_MIN_ALPHA,
+    SURFACE_MAX_ALPHA,
+    SURFACE_MIN_W,
+    SURFACE_MIN_H,
+    ANCESTOR_SCAN,
+    isOutOfFlow,
+    isGlassRegion,
+    isGlassOverlay,
+    hasAncestor
+  };
 }
 
 exports.apply = apply;

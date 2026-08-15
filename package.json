@@ -6,7 +6,7 @@
   "main": "lib/index.js",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/build.mjs && node --check lib/client.js && node scripts/check-contrast.mjs && node scripts/check-surfaces.mjs && node scripts/check-lifecycle.mjs"
+    "test": "node scripts/build.mjs && node --check lib/client.js && node scripts/check-token-parity.mjs && node scripts/check-contrast.mjs && node scripts/check-surfaces.mjs && node scripts/check-lifecycle.mjs"
   },
   "exports": {
     ".": "./lib/index.js",

@@ -13,8 +13,12 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+// the real colour module — no hand-written stub whose constants can drift
+const require = createRequire(import.meta.url);
+const realGlassColor = require(join(root, "src", "color.cjs"));
 
 /* ── stubbed browser ──────────────────────────────────────────────── */
 
@@ -43,7 +47,7 @@ const sandbox = {
     if (name === "@deepseek-ai/dsh-client-runtime/client") return { defineStore: (d) => d };
     throw new Error("unexpected require: " + name);
   },
-  glassColor: { floatTintFloor: 0.55 },
+  glassColor: realGlassColor,
   CSS: { supports: (prop, value) => prop === "backdrop-filter" && value.startsWith("url(") },
   getComputedStyle: (el) => computedOf(el),
   innerWidth: 1440,
@@ -59,7 +63,7 @@ const source = readFileSync(join(root, "src/main.js"), "utf8");
 const factory = new Function(
   ...Object.keys(sandbox),
   "exports", "module",
-  `${source}\n;return { tagSurface, createSurfaceScanner, alphaOf, GLASS_CSS, REFRACT_OK, SURFACE_ATTR, SHEET_ATTR, MERGE_ATTR, TINT_ATTR, scaleNestedTint };`
+  `${source}\n;return { tagSurface, createSurfaceScanner, alphaOf: glassColor.alphaOf, GLASS_CSS, REFRACT_OK, SURFACE_ATTR, SHEET_ATTR, MERGE_ATTR, TINT_ATTR, scaleNestedTint };`
 );
 const api = factory(...Object.values(sandbox), {}, { exports: {} });
 

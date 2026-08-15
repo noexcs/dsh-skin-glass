@@ -32,13 +32,10 @@
  * Chromium: this script scans ~/Library/Caches/ms-playwright for a headless
  * shell; install one with `npx playwright-core install chromium` if missing.
  */
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
-import zlib from "node:zlib";
-
-const require = createRequire(import.meta.url);
+import { resolvePlaywright, findChromium, SEED_DATA_URL, newGlassPage } from "./shared.mjs";
 
 const ARGS = {};
 for (let i = 2; i < process.argv.length; i++) {
@@ -46,56 +43,17 @@ for (let i = 2; i < process.argv.length; i++) {
   if (key === "--old-bundle" || key === "--shot") ARGS[key.slice(2).replace(/-/g, "")] = process.argv[++i];
 }
 
-const GUI_URL = process.env.DSH_WEB_URL || "http://127.0.0.1:3080/";
 const BUNDLE_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "lib", "client.js");
 const OLD_BUNDLE = ARGS.oldbundle || null;
 const SHOT_DIR = ARGS.shot || null;
 
-/* ── resolve playwright-core from a scratch dir / repo / DSH checkout ── */
-function resolvePlaywright() {
-  const candidates = [
-    "/tmp/dsh-glass-qa/node_modules/playwright-core",
-    "/tmp/dsh-glass-repro/node_modules/playwright-core",
-    join(dirname(fileURLToPath(import.meta.url)), "..", "..", "node_modules", "playwright-core"),
-    "/Users/noexcs/.npm/_npx/1e7f6d9597241db0/node_modules/playwright-core"
-  ];
-  for (const dir of candidates) {
-    try { return require(dir); } catch { /* keep looking */ }
-  }
-  return null;
-}
 const playwright = resolvePlaywright();
 if (playwright === null) {
   console.error("playwright-core not found. Install it once (see the header comment), then re-run.");
   process.exit(1);
 }
 const { chromium } = playwright;
-
-/* ── chromium executable discovery ─────────────────────────────────── */
-function findChromium() {
-  const cache = join(process.env.HOME || "~", "Library", "Caches", "ms-playwright");
-  if (!existsSync(cache)) return null;
-  for (const entry of readdirSync(cache)) {
-    if (!entry.startsWith("chromium")) continue;
-    const exe = join(cache, entry, "chrome-mac", "headless_shell");
-    if (existsSync(exe)) return exe;
-    const exe2 = join(cache, entry, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium");
-    if (existsSync(exe2)) return exe2;
-  }
-  return null;
-}
 const EXE = findChromium();
-
-/* ── seed image (64x64 gradient PNG data URL) ──────────────────────── */
-function crc32(buf) { let c = ~0; for (let i = 0; i < buf.length; i++) { c ^= buf[i]; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); } return ~c >>> 0; }
-function chunk(type, data) { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const t = Buffer.from(type, "ascii"); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([t, data]))); return Buffer.concat([len, t, data, crc]); }
-function pngGradient(w, h) {
-  const raw = Buffer.alloc(h * (1 + w * 4));
-  for (let y = 0; y < h; y++) { raw[y * (1 + w * 4)] = 0; for (let x = 0; x < w; x++) { const o = y * (1 + w * 4) + 1 + x * 4; raw[o] = 40 + (x / w) * 200; raw[o + 1] = 60 + (y / h) * 160; raw[o + 2] = 120 + (x / w) * 100; raw[o + 3] = 255; } }
-  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 6;
-  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
-}
-const DATA_URL = "data:image/png;base64," + pngGradient(64, 64).toString("base64");
 
 /* ── in-page probes ────────────────────────────────────────────────── */
 function snapshot() {
@@ -203,21 +161,11 @@ function verdict(ok, name, detail) {
 
 async function phase(name, serveOld, prefix) {
   console.log(`\n=== phase ${name} ===`);
-  const opts = EXE ? { executablePath: EXE, headless: true } : { headless: true };
-  const browser = await chromium.launch(opts);
-  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" });
-  const page = await ctx.newPage();
-  page.on("console", (m) => { if (m.text().includes("dsh-skin-glass")) console.log("[page]", m.text()); });
-  if (serveOld && OLD_BUNDLE) {
-    await page.route("**/plugins/dsh-skin-glass/client.js*", (route) => {
-      route.fulfill({ status: 200, contentType: "application/javascript", body: readFileSync(OLD_BUNDLE, "utf8") });
-    });
-  }
-  await page.goto(GUI_URL, { waitUntil: "domcontentloaded" });
-  await page.evaluate((img) => localStorage.setItem("dsh-skin-glass:v1", JSON.stringify({ image: img, blur: 18, translucency: 0.45 })), DATA_URL);
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await page.waitForSelector("html[data-dsh-glass]", { timeout: 20000 });
-  await page.waitForTimeout(3000);
+  const browser = await chromium.launch(EXE ? { executablePath: EXE, headless: true } : { headless: true });
+  const page = await newGlassPage(browser, {
+    routeBody: serveOld && OLD_BUNDLE ? readFileSync(OLD_BUNDLE, "utf8") : null,
+    onPage: (pg) => pg.on("console", (m) => { if (m.text().includes("dsh-skin-glass")) console.log("[page]", m.text()); })
+  });
 
   try {
     await page.locator("[data-composer-card] textarea").first().click();

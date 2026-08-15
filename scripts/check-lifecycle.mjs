@@ -16,8 +16,13 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+// the real colour module — no hand-written stub whose constants can drift
+const require = createRequire(import.meta.url);
+const realGlassColor = require(join(root, "src", "color.cjs"));
 
 /* ── assertions ───────────────────────────────────────────────────── */
 
@@ -65,11 +70,9 @@ function boot({ storage = null } = {}) {
       throw new Error("unexpected require: " + name);
     },
     glassColor: {
-      quantize: () => [],
-      pickAccent: () => [0, 0, 0],
-      analyzeWallpaper: () => ({ meanL: 0.5, stdL: 0.1 }),
-      nestedTintScale: () => 1,
-      floatTintFloor: 0.55,
+      ...realGlassColor,
+      // the only stubbed entry: record which accent the token layer was
+      // built from, so the "re-analyze on image change" assertions can see it
       buildTokens: (accent) => { built.push(accent); return {}; }
     },
     CSS: { supports: () => false },

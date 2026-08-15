@@ -17,7 +17,7 @@
 │   主色调（k-means 量化 k=6）+ 壁纸亮度画像（均值/标准差）
 │   （src/color.cjs 纯函数，node 可测）
 │        ↓
-├─ ctx.theme.overrideTokens("dsh-skin-glass", 106 个 { light, dark } 令牌对)
+├─ ctx.theme.overrideTokens("dsh-skin-glass", 109 个 { light, dark } 令牌对)
 │   —— 官方主题服务，写为 <body> 内联 CSS 变量，自动跟随明暗
 └─ 毛玻璃 chrome（data-plugin-css 样式标签，官方支持的插件 CSS 注入）：
      body::before = 壁纸层：scrim 渐变 + 图片，filter: blur(…) —— 壁纸模糊在这层
@@ -238,7 +238,7 @@ toast 一次覆盖，且不需要任何选择器。深色模式高光必须压�
 
 | 文件 | 说明 |
 | --- | --- |
-| `src/color.cjs` | 纯色数学：HSL 互转、mix、tune、k-means 量化、主色挑选、壁纸亮度画像、106 个令牌对的分层生成器 |
+| `src/color.cjs` | 纯色数学：HSL 互转、mix、tune、k-means 量化、主色挑选、壁纸亮度画像、109 个令牌对的分层生成器 |
 | `src/main.js` | 浏览器侧逻辑：设置行组件、图片压缩（≤1920px、webp/jpeg）、取色、令牌应用、chrome 样式、localStorage 持久化 |
 | `scripts/build.mjs` | 把 src 内联进 `lib/client.js` 的 `__ModuleLoader__.load` 包装 |
 | `scripts/check-contrast.mjs` | 对比度守门人（见上「可读性模型」） |

@@ -13,24 +13,13 @@ A frosted-glass skin plugin for the DeepSeek Harness web GUI.
 ## Install
 
 ```bash
-git clone https://github.com/noexcs/dsh-skin-glass
-cd dsh-skin-glass && bash install.sh
+npx @deepseek-ai/dsh plugin --profile web add github:noexcs/dsh-skin-glass
 ```
-
-Or directly from GitHub: `bash <(curl -fsSL https://raw.githubusercontent.com/noexcs/dsh-skin-glass/main/install.sh)`.
-
-Manually, with the dsh CLI (fetches from GitHub):
-
-```bash
-dsh plugin --profile web add github:noexcs/dsh-skin-glass
-```
-
-Installs into the `web` profile, restarts `dsh web`, then pick an image under **Settings → General → Wallpaper**. Without a wallpaper the skin stays fully inactive.
 
 ## Uninstall
 
 ```bash
-bash uninstall.sh
+npx @deepseek-ai/dsh plugin --profile web remove dsh-skin-glass
 ```
 
 ## License

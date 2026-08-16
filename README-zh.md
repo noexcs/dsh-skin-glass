@@ -13,24 +13,14 @@
 ## 安装
 
 ```bash
-git clone https://github.com/noexcs/dsh-skin-glass
-cd dsh-skin-glass && bash install.sh
+npx @deepseek-ai/dsh plugin --profile web add github:noexcs/dsh-skin-glass
 ```
 
-或直接从 GitHub 安装：`bash <(curl -fsSL https://raw.githubusercontent.com/noexcs/dsh-skin-glass/main/install.sh)`。
-
-或手动用 dsh CLI 安装（直接从 GitHub 拉取）：
-
-```bash
-dsh plugin --profile web add github:noexcs/dsh-skin-glass
-```
-
-脚本自动安装到 `web` profile 并重启 `dsh web`，之后到 **设置 → 通用 → 背景图** 选择图片即可生效；不设背景图时皮肤完全不介入。
 
 ## 卸载
 
 ```bash
-bash uninstall.sh
+npx @deepseek-ai/dsh plugin --profile web remove dsh-skin-glass
 ```
 
 ## License

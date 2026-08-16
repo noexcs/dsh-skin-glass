@@ -80,7 +80,7 @@ export async function newGlassPage(browser, { routeBody = null, settleMs = 3000,
   }
   await page.goto(process.env.DSH_WEB_URL || "http://127.0.0.1:3080/", { waitUntil: "domcontentloaded" });
   await page.evaluate((img) => localStorage.setItem("dsh-skin-glass:v1",
-    JSON.stringify({ image: img, blur: 18, translucency: 0.45 })), SEED_DATA_URL);
+    JSON.stringify({ image: img, blur: 18 })), SEED_DATA_URL);
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.waitForSelector("html[data-dsh-glass]", { timeout: 20000 });
   if (settleMs > 0) await page.waitForTimeout(settleMs);

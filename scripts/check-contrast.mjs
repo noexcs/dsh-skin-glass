@@ -190,6 +190,36 @@ for (const [accentName, accent] of Object.entries(ACCENTS)) {
   }
 }
 
+// The no-image fallback emits an extra token pair (the gradient wallpaper).
+// It is emitted ONLY with gradient:true — with a real image the wallpaper
+// layer is the image URL — and must be legal CSS, mode-distinct, and carry
+// the accent's hue in both modes.
+{
+  for (const [accentName, accent] of Object.entries(ACCENTS)) {
+    const withGradient = glassColor.buildTokens(accent, { t: 0.45, blurPx: 18, gradient: true });
+    const plain = glassColor.buildTokens(accent, { t: 0.45, blurPx: 18 });
+    const img = withGradient["--dsh-glass-image"];
+    if (img === undefined) {
+      failures.push(`gradient fallback: --dsh-glass-image missing for ${accentName}`);
+      continue;
+    }
+    if (plain["--dsh-glass-image"] !== undefined) {
+      failures.push(`gradient fallback: --dsh-glass-image leaks into the image mode for ${accentName}`);
+    }
+    for (const mode of ["light", "dark"]) {
+      const v = img[mode];
+      if (typeof v !== "string" || v === "" || v.includes("undefined") || v.includes("NaN")) {
+        failures.push(`gradient fallback: malformed --dsh-glass-image (${mode}) for ${accentName}: ${v}`);
+      } else if (!v.includes("linear-gradient") || !v.includes("radial-gradient")) {
+        failures.push(`gradient fallback: --dsh-glass-image (${mode}) is not a mesh gradient for ${accentName}`);
+      }
+    }
+    if (img.light === img.dark) {
+      failures.push(`gradient fallback: light and dark gradients are identical for ${accentName}`);
+    }
+  }
+}
+
 // Two things worth eyeballing: the tightest margin anywhere (is the design
 // safe?) and how much scrim a friendly image gets away with (is the adaptive
 // part actually buying transparency?).

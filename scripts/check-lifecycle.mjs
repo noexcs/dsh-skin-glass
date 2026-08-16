@@ -167,12 +167,16 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   // this is the migration path for records written before translucency existed
   check("a pre-translucency record takes the default",
     normalize({ image: "x", blur: 30 }),
-    { image: "x", blur: 30, translucency: DEFAULTS.translucency });
+    { image: "x", blur: 30 });
   check("wrong types fall back per field",
-    normalize({ image: 5, blur: "30", translucency: NaN }), DEFAULTS);
+    normalize({ image: 5, blur: "30" }), DEFAULTS);
   check("valid values survive",
-    normalize({ image: "d", blur: 4, translucency: 0.9 }),
-    { image: "d", blur: 4, translucency: 0.9 });
+    normalize({ image: "d", blur: 4 }),
+    { image: "d", blur: 4 });
+  // translucency was removed: a stale record field is dropped, not kept
+  check("a stale translucency field is dropped",
+    normalize({ image: "d", blur: 4, translucency: 0.2 }),
+    { image: "d", blur: 4 });
 }
 
 /* ── persisted state is read at boot ──────────────────────────────── */
@@ -181,7 +185,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   const stored = JSON.stringify({ image: "AAA", blur: 30, translucency: 0.8 });
   const { rowState, rootProps, rootAttrs } = boot({ storage: stored });
   check("boot restores the persisted record", rowState,
-    { image: "AAA", blur: 30, translucency: 0.8 });
+    { image: "AAA", blur: 30 });
   check("boot gates the chrome stylesheet on the attribute", rootAttrs.has("data-dsh-glass"), true);
   check("boot publishes the wallpaper blur", rootProps.get("--dsh-glass-blur"), "30px");
   // surfaces blur their backdrop less than the wallpaper does
@@ -189,9 +193,11 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
 }
 
 {
-  const { rowState, rootAttrs } = boot({ storage: "{not json" });
+  const { rowState, rootAttrs, rootProps } = boot({ storage: "{not json" });
   check("a corrupt record falls back to defaults", rowState.image, "");
-  check("and leaves the native theme untouched", rootAttrs.has("data-dsh-glass"), false);
+  // no image at boot → the gradient fallback gates the chrome
+  check("so the chrome stylesheet is gated anyway", rootAttrs.has("data-dsh-glass"), true);
+  check("with the inline image var unset (the token drives it)", rootProps.has("--dsh-glass-image"), false);
 }
 
 /* ── image analysis is keyed on the image ─────────────────────────────
@@ -222,10 +228,9 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   // a slider move must reuse the analysis: re-decoding on every drag frame is
   // exactly what the cache is for
   actions.setBlur(30);
-  actions.setTranslucency(0.9);
   await settle();
-  check("blur/translucency changes never re-analyze", analyzed, ["AAAA"]);
-  check("but they do rebuild the token layer", built.length > afterImage, true);
+  check("a blur change never re-analyzes", analyzed, ["AAAA"]);
+  check("but it does rebuild the token layer", built.length > afterImage, true);
   check("reusing the cached accent", built.at(-1), [4, 0, 0]);
 }
 
@@ -235,13 +240,35 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   await settle();
   actions.clearImage();
   await settle();
-  check("clearing ungates the chrome stylesheet", rootAttrs.has("data-dsh-glass"), false);
-  check("and blanks the image variable", rootProps.get("--dsh-glass-image"), "none");
+  // no image → the gradient fallback takes over, not the native theme
+  check("clearing keeps the chrome gated (gradient fallback)", rootAttrs.has("data-dsh-glass"), true);
+  check("and drops the inline image var (the token drives it)", rootProps.has("--dsh-glass-image"), false);
 
   // the same image again must be re-analyzed: the cache was dropped with it
   await actions.chooseFile("AAAA");
   await settle();
   check("re-picking the cleared image re-analyzes", analyzed, ["AAAA", "AAAA"]);
+}
+
+/* ── gradient fallback (no image) ─────────────────────────────────────
+   With no image the chrome is gated and the token layer is built from the
+   default accent (no decode, no analysis). An image always wins: it swaps
+   the wallpaper URL in and drives the analysis + accent extraction. */
+
+{
+  const { built, rootAttrs, rootProps } = boot();
+  check("no image gates the chrome (gradient fallback)", rootAttrs.has("data-dsh-glass"), true);
+  check("and leaves the inline image var unset (the token drives it)", rootProps.has("--dsh-glass-image"), false);
+  check("the gradient token layer uses the default accent", built.at(-1), [99, 102, 241]);
+}
+
+{
+  const { built, rootAttrs, rootProps, actions } = boot();
+  await actions.chooseFile("AAAA");
+  await settle();
+  check("an image keeps the chrome gated", rootAttrs.has("data-dsh-glass"), true);
+  check("and drives the wallpaper via the image URL", rootProps.get("--dsh-glass-image"), 'url("AAAA")');
+  check("and the tokens follow the image accent", built.at(-1), [4, 0, 0]);
 }
 
 /* ── persistence ──────────────────────────────────────────────────── */
@@ -250,12 +277,11 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   const { actions, persisted } = boot();
   await actions.chooseFile("AAAA");
   actions.setBlur(30.4);
-  actions.setTranslucency(1.8);
   await settle();
   check("the record is written back", JSON.parse(persisted.value),
-    { image: "AAAA", blur: 30, translucency: 1 });
+    { image: "AAAA", blur: 30 });
   check("blur is rounded to whole pixels", JSON.parse(persisted.value).blur, 30);
-  check("translucency is clamped to 0..1", JSON.parse(persisted.value).translucency, 1);
+  check("and no translucency field is persisted", JSON.parse(persisted.value).translucency, undefined);
 }
 
 /* ── failure paths ────────────────────────────────────────────────────
@@ -268,7 +294,9 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
   await settle();
   check("a decode failure reaches the row", errors.at(-1), "glass.error.decode");
   check("nothing was analyzed", analyzed, []);
-  check("and the skin stays ungated", rootAttrs.has("data-dsh-glass"), false);
+  // boot already activated the gradient fallback, and the failed pick
+  // changed nothing — the fallback stays up
+  check("and the gradient fallback stays gated", rootAttrs.has("data-dsh-glass"), true);
 }
 
 {

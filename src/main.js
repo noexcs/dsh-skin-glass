@@ -14,7 +14,16 @@ const SAMPLE_DIM = 64;
 
 /** Defaults for the persisted state; also the fallbacks for partial records. */
 const DEFAULT_BLUR = 18;
-const DEFAULT_TRANSLUCENCY = 0.45;
+/** Translucency is pinned at its maximum (100% see-through) — no slider.
+ *  The tier alphas, scrim and legibility floors (see buildTokens) are what
+ *  keep text readable at this setting. */
+const TRANSLUCENCY = 1;
+/** Accent used by the gradient fallback — the same indigo the quantizer
+ *  falls back to for an unanalyzable image. */
+const FALLBACK_ACCENT = [99, 102, 241];
+/** Sentinel `src` of the synthetic analysis cache entry of the gradient
+ *  fallback: no image exists to decode, so no real analysis does either. */
+const GRADIENT_SRC = "__gradient__";
 
 /* ── chrome stylesheet: image layer + scrim ───────────────────────────
    The blur lives on the wallpaper layer, not on a backdrop-filter over the
@@ -47,8 +56,10 @@ const DEFAULT_TRANSLUCENCY = 0.45;
    Depth behind modals is restored through --dsw-mask-blur, which the
    product's own `.mask` elements already consume.
 
-   Everything is gated on html[data-dsh-glass] so that with no background
-   image the skin contributes nothing at all. */
+   Everything is gated on html[data-dsh-glass]. With no background image the
+   gradient fallback — a --dsh-glass-image token pair, a soft accent-tinted
+   mesh gradient (see buildTokens) — stands in for the wallpaper and every
+   effect works exactly as with a real image. */
 
 /**
  * Refraction filter. Chromium is the only engine that accepts `url(#…)` in
@@ -261,8 +272,8 @@ const SYNC_BUDGET = 400;
 /**
  * Retags driven by body token writes are throttled: a theme switch is ONE
  * batch in ONE observer callback and retags immediately (atomic, pre-paint),
- * while a translucency drag rewrites tokens at input rate and only needs
- * occasional passes (the leading edge plus a trailing catch-up).
+ * while a blur/image change rewrites tokens and only needs occasional
+ * passes (the leading edge plus a trailing catch-up).
  */
 const RETAG_THROTTLE_MS = 200;
 
@@ -890,8 +901,6 @@ const zh = {
   "glass.choose": "选择图片",
   "glass.remove": "移除",
   "glass.blur": "背景模糊",
-  "glass.translucency": "通透度",
-  "glass.hint": "主题色自动取自背景图；通透度只放开聊天背景与侧边栏，弹窗、菜单、代码块等阅读区域保留可读下限",
   "glass.processing": "正在处理图片…",
   "glass.error.decode": "图片解码失败：请换一张图片（如 JPG/PNG/WebP）",
   "glass.error.write": "保存到浏览器存储失败（图片过大或隐私模式）"
@@ -901,8 +910,6 @@ const en = {
   "glass.choose": "Choose image",
   "glass.remove": "Remove",
   "glass.blur": "Background blur",
-  "glass.translucency": "Translucency",
-  "glass.hint": "Theme colors are extracted from the image; translucency only opens up the chat background and sidebar — dialogs, menus and code keep a legibility floor",
   "glass.processing": "Processing image…",
   "glass.error.decode": "Image decode failed: try another image (JPG/PNG/WebP)",
   "glass.error.write": "Failed to persist to browser storage (image too large or private mode)"
@@ -918,7 +925,6 @@ const createRowStore = () => defineStore({
     sync: (d, value) => {
       d.image = value.image;
       d.blur = value.blur;
-      d.translucency = value.translucency;
     },
     status: (d, message) => {
       d.status = message;
@@ -950,7 +956,6 @@ const thumbStyle = {
   objectFit: "cover",
   border: "1px solid var(--dsw-alias-border-l2)"
 };
-const hintStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 };
 const sliderLabelStyle = { fontSize: 13, minWidth: 64 };
 const readoutStyle = { fontSize: 12, minWidth: 36, textAlign: "right" };
 
@@ -974,8 +979,8 @@ function sliderLine(label, value, max, step, readout, onInput) {
   );
 }
 
-function GlassRow({ t, useStore, chooseFile, clearImage, setBlur, setTranslucency }) {
-  const { image, blur, translucency, status, error } = useStore((s) => s);
+function GlassRow({ t, useStore, chooseFile, clearImage, setBlur }) {
+  const { image, blur, status, error } = useStore((s) => s);
   const fileRef = React.useRef(null);
   const onFile = (e) => {
     const file = e.target.files && e.target.files[0];
@@ -991,10 +996,8 @@ function GlassRow({ t, useStore, chooseFile, clearImage, setBlur, setTranslucenc
       React.createElement("input", { ref: fileRef, type: "file", accept: "image/*", style: { display: "none" }, onChange: onFile })
     ),
     sliderLine(t("glass.blur"), blur, 48, 1, `${blur}px`, setBlur),
-    sliderLine(t("glass.translucency"), Math.round(translucency * 100), 100, 1, `${Math.round(translucency * 100)}%`, (v) => setTranslucency(v / 100)),
     status ? React.createElement("div", { style: statusStyle }, status) : null,
-    error ? React.createElement("div", { style: errorStyle }, error) : null,
-    React.createElement("div", { style: hintStyle }, t("glass.hint"))
+    error ? React.createElement("div", { style: errorStyle }, error) : null
   );
 }
 
@@ -1003,7 +1006,7 @@ function GlassRow({ t, useStore, chooseFile, clearImage, setBlur, setTranslucenc
    state in localStorage) ─────────────────────────────────────────── */
 
 const STORAGE_KEY = "dsh-skin-glass:v1";
-const DEFAULTS = { image: "", blur: DEFAULT_BLUR, translucency: DEFAULT_TRANSLUCENCY };
+const DEFAULTS = { image: "", blur: DEFAULT_BLUR };
 
 /**
  * Coerce an arbitrary record to the state shape, field by field. This is
@@ -1014,10 +1017,7 @@ function normalize(value) {
   const v = value !== null && typeof value === "object" ? value : {};
   return {
     image: typeof v.image === "string" ? v.image : DEFAULTS.image,
-    blur: typeof v.blur === "number" && isFinite(v.blur) ? v.blur : DEFAULTS.blur,
-    translucency: typeof v.translucency === "number" && isFinite(v.translucency)
-      ? v.translucency
-      : DEFAULTS.translucency
+    blur: typeof v.blur === "number" && isFinite(v.blur) ? v.blur : DEFAULTS.blur
   };
 }
 
@@ -1080,13 +1080,17 @@ function apply(ctx) {
   /** Apply (or re-apply) the token layer with the cached analysis + current settings. */
   const applyTokens = () => {
     if (!imageCache) return;
-    // a media query cannot reach the token layer, so the OS preference is
-    // honoured here by collapsing translucency to its most legible end
-    const t = reduceQuery !== null && reduceQuery.matches ? 0 : stored.translucency;
+    // translucency is pinned at maximum; a media query cannot reach the
+    // token layer, so the OS "reduce transparency" preference is honoured
+    // here by collapsing it to its most legible end
+    const t = reduceQuery !== null && reduceQuery.matches ? 0 : TRANSLUCENCY;
     tokenDisposer = ctx.theme.overrideTokens("dsh-skin-glass", glassColor.buildTokens(imageCache.accent, {
       t,
       blurPx: stored.blur,
-      wallpaper: imageCache.wallpaper
+      wallpaper: imageCache.wallpaper,
+      // gradient fallback: emit the --dsh-glass-image token pair instead of
+      // relying on the (absent) inline image URL — see refresh()
+      gradient: imageCache.src === GRADIENT_SRC
     }));
     // surface alphas just changed, so how hard nested fills must be held back
     // changed with them. No retag here: the theme presenter writes this token
@@ -1101,31 +1105,37 @@ function apply(ctx) {
   const refresh = () => {
     const { image, blur } = stored;
     const root = document.documentElement;
+    const gradient = !image;
     const escaped = image.replace(/"/g, '\\"');
-    root.style.setProperty("--dsh-glass-image", image ? `url("${escaped}")` : "none");
+    // A real image lives here as an inline root var. With no image the
+    // wallpaper is the --dsh-glass-image token pair instead, so the inline
+    // property must be ABSENT — an empty inline value is guaranteed-invalid
+    // and would make the chrome rule's var(--dsh-glass-image, none) fall
+    // back to `none`, shadowing the token.
+    if (image) root.style.setProperty("--dsh-glass-image", `url("${escaped}")`);
+    else root.style.removeProperty("--dsh-glass-image");
     root.style.setProperty("--dsh-glass-blur", `${blur}px`);
     // surfaces blur their own backdrop less than the wallpaper does: they sit
     // over app content, which should stay recognisable through the glass
     root.style.setProperty("--dsh-surface-blur", `${Math.max(6, Math.round(blur * 0.7))}px`);
-    // more glass to look through, more the light should bend through it
+    // more glass to look through, more the light should bend through it —
+    // translucency is pinned at maximum, so the refraction is at full strength
     const displacement = document.querySelector(`#${REFRACT_ID} feDisplacementMap`);
-    if (displacement !== null) displacement.setAttribute("scale", String(Math.round(8 + 30 * stored.translucency)));
-    // the chrome stylesheet is gated on this attribute: with no image the skin
-    // leaves the native theme completely untouched
-    if (image) root.setAttribute("data-dsh-glass", "");
-    else root.removeAttribute("data-dsh-glass");
-    if (!image) {
-      imageCache = null;
-      applySeq += 1;            // abandon any analysis still in flight
-      scanner.clear();
-      if (tokenDisposer) {
-        tokenDisposer();
-        tokenDisposer = null;
-      }
+    if (displacement !== null) displacement.setAttribute("scale", String(Math.round(8 + 30 * TRANSLUCENCY)));
+    // the chrome stylesheet is gated on this attribute. It is always set
+    // while the skin is loaded: an image or the gradient fallback (no
+    // image) is what the wallpaper layer paints either way.
+    root.setAttribute("data-dsh-glass", "");
+    // gradient fallback: no decode, no analysis — a synthetic cache entry
+    // with the default accent. Omitting the wallpaper profile keeps the
+    // worst-case scrim, the safe choice for an unknown backdrop.
+    if (gradient) {
+      imageCache = { accent: FALLBACK_ACCENT, src: GRADIENT_SRC };
+      applyTokens();
       return;
     }
     if (imageCache !== null && imageCache.src === image) {
-      applyTokens();   // blur/translucency-only change: same image analysis
+      applyTokens();   // blur-only change: same image analysis
       return;
     }
     const seq = ++applySeq;
@@ -1145,7 +1155,6 @@ function apply(ctx) {
   console.log("[dsh-skin-glass] ready:", JSON.stringify({
     image: stored.image ? "set" : "none",
     blur: stored.blur,
-    translucency: stored.translucency,
     theme: typeof ctx.theme.overrideTokens === "function"
   }));
 
@@ -1188,8 +1197,8 @@ function apply(ctx) {
     // writes ~200 properties in a single task — measured), and the callback
     // is a microtask before paint: retagging right here makes a theme
     // switch atomic — the markers stay (soft retag, no strip), so the frost
-    // never blinks off. A translucency drag rewrites tokens at input rate,
-    // hence the leading-edge + trailing throttle: the last state always
+    // never blinks off. A blur change rewrites the token layer too, hence
+    // the leading-edge + trailing throttle: the last state always
     // catches up, the intermediate ones coalesce.
     let retagTimer = null;
     let lastRetagAt = 0;
@@ -1285,9 +1294,6 @@ function apply(ctx) {
         },
         setBlur: (v) => {
           commit({ blur: Math.round(v) });
-        },
-        setTranslucency: (v) => {
-          commit({ translucency: Math.max(0, Math.min(1, v)) });
         }
       };
     }

@@ -4,6 +4,7 @@ A frosted-glass skin plugin for the DeepSeek Harness web GUI.
 
 - 🖼️ Set any wallpaper — it auto-generates light/dark design tokens from the dominant color
 - 💎 True per-component `backdrop-filter` glass with adaptive scrim and mirror-edge highlights
+- 🌈 No wallpaper? An automatic gradient glass keeps the frosted look
 - 👓 Readability floor: WCAG AA body contrast at any translucency level
 
 | Light | Dark |

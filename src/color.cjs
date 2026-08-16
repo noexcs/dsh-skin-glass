@@ -277,7 +277,8 @@ const FLOAT_TINT_FLOOR = 0.55;
  * @param accent - [r, g, b] accent triplet.
  * @param options - { t: 0..1 translucency, blurPx: wallpaper blur radius,
  *   wallpaper: { meanL, stdL } from {@link analyzeWallpaper} — omit it and
- *   the scrim falls back to worst-case strength }.
+ *   the scrim falls back to worst-case strength, gradient: true to also
+ *   emit a --dsh-glass-image pair — the no-image fallback wallpaper }.
  */
 function buildTokens(accent, options = {}) {
   const a = accent;
@@ -327,6 +328,26 @@ function buildTokens(accent, options = {}) {
     rgba(WHITE, 0.04 + t * 0.44 * needLight),
     rgba(SCRIM_DARK, 0.06 + t * 0.52 * needDark)
   );
+
+  // Fallback wallpaper for the no-image mode: a soft accent-tinted mesh
+  // gradient, one per mode, driven by the same accent as the tokens. It
+  // rides the token layer exactly like the scrim (a body-level var), so the
+  // light/dark switch applies it automatically with no chrome CSS branches.
+  // Only emitted when `gradient: true` — with a real image the wallpaper
+  // layer is the image URL, never a gradient.
+  let gradientImage = null;
+  if (options.gradient === true) {
+    gradientImage = pair(
+      `radial-gradient(120% 130% at 12% 6%, ${rgba(tune(a, 0.88, 0.5), 0.55)}, transparent 55%),` +
+      `radial-gradient(110% 120% at 88% 12%, ${rgba(tune(a, 0.93, 0.42), 0.5)}, transparent 55%),` +
+      `radial-gradient(150% 150% at 50% 112%, ${rgba(tune(a, 0.97, 0.38), 0.45)}, transparent 60%),` +
+      `linear-gradient(135deg, ${rgb(tune(a, 0.985, 0.3))}, ${rgb(tune(a, 0.95, 0.36))})`,
+      `radial-gradient(120% 130% at 12% 6%, ${rgba(tune(a, 0.32, 0.5), 0.4)}, transparent 55%),` +
+      `radial-gradient(110% 120% at 88% 12%, ${rgba(tune(a, 0.26, 0.45), 0.35)}, transparent 55%),` +
+      `radial-gradient(150% 150% at 50% 112%, ${rgba(tune(a, 0.18, 0.45), 0.5)}, transparent 60%),` +
+      `linear-gradient(135deg, ${rgb(tune(a, 0.14, 0.42))}, ${rgb(tune(a, 0.2, 0.48))})`
+    );
+  }
 
   // Modal scrims + the product's own mask blur hook (`.mask` elements already
   // declare `backdrop-filter: var(--dsw-mask-blur)`); raising it puts a real
@@ -423,6 +444,7 @@ function buildTokens(accent, options = {}) {
     /* wallpaper + modal scrims (consumed by the chrome stylesheet and by the
        product's own `.mask` elements) */
     "--dsh-glass-scrim": scrim,
+    ...(gradientImage !== null ? { "--dsh-glass-image": gradientImage } : {}),
     "--dsw-mask-blur": pair(maskBlur, maskBlur),
     "--dsw-alias-bg-mask-1": pair(rgba(MASK_INK, 0.18 + 0.16 * t), rgba(BLACK, 0.4 + 0.18 * t)),
     "--dsw-alias-bg-mask-2": pair(rgba(MASK_INK, 0.1 + 0.1 * t), rgba(BLACK, 0.24 + 0.14 * t)),

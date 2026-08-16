@@ -13,13 +13,33 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+// the real colour module — no hand-written stub whose constants can drift
+const require = createRequire(import.meta.url);
+const realGlassColor = require(join(root, "src", "color.cjs"));
 
 /* ── stubbed browser ──────────────────────────────────────────────── */
 
 let computedOf = () => ({ backgroundColor: "rgb(0, 0, 0)", position: "static" });
 
+/**
+ * Attribute-selector `querySelectorAll` over the fake tree. The real one is
+ * how `stripTags` finds what to clean up, so stubbing it to `[]` would make
+ * every teardown assertion vacuously pass.
+ */
+function queryAll(selector) {
+  const attrs = selector.split(",").map((s) => s.trim().replace(/^\[|\]$/g, ""));
+  const out = [];
+  const walk = (el) => {
+    if (el === null) return;
+    if (attrs.some((a) => el.hasAttribute(a))) out.push(el);
+    for (const c of el.children) walk(c);
+  };
+  walk(sandbox.document.body);
+  return out;
+}
 
 const sandbox = {
   require: (name) => {
@@ -27,12 +47,12 @@ const sandbox = {
     if (name === "@deepseek-ai/dsh-client-runtime/client") return { defineStore: (d) => d };
     throw new Error("unexpected require: " + name);
   },
-  glassColor: {},
+  glassColor: realGlassColor,
   CSS: { supports: (prop, value) => prop === "backdrop-filter" && value.startsWith("url(") },
   getComputedStyle: (el) => computedOf(el),
   innerWidth: 1440,
   innerHeight: 900,
-  document: { querySelectorAll: () => [], body: null },
+  document: { querySelectorAll: (s) => queryAll(s), body: null },
   requestIdleCallback: (fn) => fn(),
   MutationObserver: function () {},
   matchMedia: null,
@@ -43,7 +63,7 @@ const source = readFileSync(join(root, "src/main.js"), "utf8");
 const factory = new Function(
   ...Object.keys(sandbox),
   "exports", "module",
-  `${source}\n;return { tagSurface, createSurfaceScanner, alphaOf, GLASS_CSS, REFRACT_OK, SURFACE_ATTR, SHEET_ATTR, MERGE_ATTR, TINT_ATTR, scaleNestedTint };`
+  `${source}\n;return { tagSurface, createSurfaceScanner, alphaOf: glassColor.alphaOf, GLASS_CSS, REFRACT_OK, SURFACE_ATTR, SHEET_ATTR, MERGE_ATTR, TINT_ATTR, scaleNestedTint };`
 );
 const api = factory(...Object.values(sandbox), {}, { exports: {} });
 
@@ -61,7 +81,10 @@ function makeEl({ bg = "rgba(0, 0, 0, 0)", w = 240, h = 120, position = "static"
       if (k === "background-color") inline.backgroundColor = v;
       if (k === "color") inline.color = v;
     },
-    removeProperty(k) { if (k === "background-color") inline.backgroundColor = ""; }
+    removeProperty(k) {
+      if (k === "background-color") inline.backgroundColor = "";
+      if (k === "color") inline.color = "";
+    }
   };
   const el = {
     nodeType: 1,
@@ -108,7 +131,23 @@ const { tagSurface, createSurfaceScanner, alphaOf, GLASS_CSS, SURFACE_ATTR, SHEE
 // never becomes a containing block for the inline fixed tooltips
 check("sheet rule anchors the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]{position:relative}"), true);
 check("sheet frost rides the pseudo", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]::before{"), true);
-check("reduced-transparency kills sheet frost too", GLASS_CSS.includes("html[data-dsh-glass] [data-dsh-glass-sheet]::before{\n-webkit-backdrop-filter:none"), true);
+// one refraction filter for every tagged surface — the command palette is
+// the reference effect, so there is deliberately no size-based gradation
+check("surfaces get the refraction filter",
+  GLASS_CSS.includes(`[data-dsh-glass-surface=lg]{${"-webkit-backdrop-filter:url(#dsh-glass-refract)"}`), true);
+check("sheets get the refraction filter",
+  GLASS_CSS.includes(`[data-dsh-glass-sheet=lg]::before{${"-webkit-backdrop-filter:url(#dsh-glass-refract)"}`), true);
+check("no leftover small-tier refraction rule", GLASS_CSS.includes("refract-sm"), false);
+check("reduced-transparency kills sheet frost too",
+  /@media \(prefers-reduced-transparency: reduce\)\{[\s\S]*\[data-dsh-glass-sheet\]::before\{[^}]*backdrop-filter:none/.test(GLASS_CSS), true);
+// the frost value is emitted from one constant; if a refactor ever lets the
+// two vendor spellings drift, the -webkit- one silently stops matching Safari
+for (const rule of GLASS_CSS.split("\n").filter((l) => l.includes("backdrop-filter:"))) {
+  const webkit = /-webkit-backdrop-filter:([^;}]+)/.exec(rule);
+  const plain = /[^-]backdrop-filter:([^;}]+)/.exec(rule);
+  check(`prefixed and unprefixed frost agree in: ${rule.slice(0, 46)}…`,
+    webkit !== null && plain !== null && webkit[1] === plain[1], true);
+}
 
 // the conversation hover card declares --dsw-hovercard-bg ON ITSELF, out of
 // reach of the body-level token layer; the chrome stylesheet must rebind it
@@ -138,7 +177,17 @@ check("overlay gets refraction", panel.getAttribute(SURFACE_ATTR), "lg");
 
 const chip = makeEl({ bg: "rgba(255, 255, 255, 0.8)", w: 90, h: 30, position: "fixed" });
 check("small overlay is tagged", tagSurface(chip), true);
-check("small overlay skips refraction", chip.getAttribute(SURFACE_ATTR), "sm");
+check("small overlay gets the same refraction as the palette", chip.getAttribute(SURFACE_ATTR), "lg");
+
+/* when the engine cannot run url() backdrop filters (Safari, Firefox) the
+   marker must withhold the tier values entirely: the url() rules must never
+   match there, because an unresolvable url() invalidates the whole
+   backdrop-filter value and the base frost rule would die with it */
+const plainSandbox = { ...sandbox, CSS: { supports: () => false } };
+const plainApi = factory(...Object.values(plainSandbox), {}, { exports: {} });
+const nonRefractPanel = makeEl({ bg: "rgba(255, 255, 255, 0.8)", w: 400, h: 300, position: "fixed" });
+check("non-Chromium overlay is still tagged", plainApi.tagSurface(nonRefractPanel), true);
+check("non-Chromium marker withholds the url tier", nonRefractPanel.getAttribute(SURFACE_ATTR), "plain");
 
 // in-flow sheets (columns, cards, rows) get the sheet marker: the frost
 // rides a ::before pseudo, so hover tooltips inside them are never
@@ -160,11 +209,16 @@ const settingsShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position
 check("panel inside an overlay shell is tagged", tagSurface(settingsPanel), true);
 check("panel inside an overlay shell takes the real filter", settingsPanel.getAttribute(SURFACE_ATTR), "lg");
 
-// an element inside an already-marked region belongs to the outer marker
+// an element inside an already-marked region still gets its own sheet
+// pseudo — every component gets the palette treatment (the census gap:
+// bubbles, the composer, cards and buttons inside the conversation column
+// used to be tint-only)
 const nested = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 200, h: 100 });
 const markedShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 400, h: 300, children: [nested] });
 markedShell.setAttribute(SHEET_ATTR, "lg");
-check("element inside a marked region is not re-tagged", tagSurface(nested), false);
+check("element inside a marked region is tagged as a nested sheet", tagSurface(nested), true);
+check("nested surface carries the sheet marker", nested.getAttribute(SHEET_ATTR), "lg");
+check("nested surface gets no direct filter marker", nested.hasAttribute(SURFACE_ATTR), false);
 
 // a viewport-filling surface has only the (already blurred) wallpaper behind
 // it, so it must be skipped — but its children still need visiting
@@ -187,7 +241,10 @@ scanner.add(viewport);
 check("viewport root not tagged", viewport.hasAttribute(SHEET_ATTR), false);
 check("transparent wrapper not tagged", inert.hasAttribute(SHEET_ATTR), false);
 check("outermost glass tagged as sheet", child.hasAttribute(SHEET_ATTR), true);
-check("nested glass NOT tagged (no stacked filters)", grandchild.hasAttribute(SHEET_ATTR), false);
+// a repeat of the surface's own colour is merged, not tagged — tagging it
+// would re-introduce the opacity compounding the merge rule prevents
+check("repeat of the surface colour is merged, not tagged", grandchild.hasAttribute(SHEET_ATTR), false);
+check("and carries the merge marker", grandchild.hasAttribute(MERGE_ATTR), true);
 
 /* ── stacked repeats of the surface colour must be zeroed ─────────────
    The trajectory panel is `bg-layer-1` with several `bg-layer-1` children
@@ -314,12 +371,143 @@ scanner9.setTintScale(0.5);
 scanner9.add(sideShell);
 check("dialog panel takes the real filter", dlgPanel.getAttribute(SURFACE_ATTR), "lg");
 check("dialog panel fill is tinted inside the glass region", dlgPanel.getAttribute(TINT_ATTR), "rgba(246, 247, 252, 0.85)");
-check("dialog panel alpha is scaled", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.425)");
+check("dialog panel alpha is scaled", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
 
 // a retag while the dialog is open must keep the panel's frost and tint
 scanner9.retag();
 check("retag with the dialog open keeps the panel's filter", dlgPanel.getAttribute(SURFACE_ATTR), "lg");
-check("retag with the dialog open keeps the panel's tint", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.425)");
+check("retag with the dialog open keeps the panel's tint", dlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
+
+/* ── regression: panels inside a body-level modal shell are normalized ──
+   The Full-access confirm dialog mounts in its own portal root at body
+   level: no marked glass ancestor within the scan bound, so the old walk
+   left its fill at the full token alpha (0.85) while a palette mounted
+   inside the sidebar sheet was scaled to 0.58 — the two panels read
+   differently. Crossing an unmarked out-of-flow shell now starts a tint
+   context, so the dialog's fill is normalized like a nested fill's and both
+   surfaces read the same translucency. */
+
+const modalPanel = makeEl({ bg: "rgba(246, 247, 252, 0.85)", w: 442, h: 272 });
+const modalShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position: "fixed", children: [modalPanel] });
+sandbox.document.body = modalShell;
+const scanner13 = createSurfaceScanner();
+scanner13.setTintScale(0.3);
+scanner13.add(modalShell);
+check("modal panel takes the real filter", modalPanel.getAttribute(SURFACE_ATTR), "lg");
+check("modal panel fill is normalized, floored for legibility", modalPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
+check("modal panel remembers its original colour", modalPanel.getAttribute(TINT_ATTR), "rgba(246, 247, 252, 0.85)");
+
+// a retag while the dialog is open must keep both the filter and the tint
+scanner13.retag();
+check("retag keeps the modal panel's filter", modalPanel.getAttribute(SURFACE_ATTR), "lg");
+check("retag keeps the modal panel's tint", modalPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
+
+/* a body-level portaled menu (the session/workspace dropdowns) mounts as a
+   direct fixed child: the shell crossing is the tagged surface itself, and
+   it must be normalized just the same */
+const portaledMenu = makeEl({ bg: "rgba(255, 255, 255, 0.85)", w: 218, h: 130, position: "fixed" });
+sandbox.document.body = portaledMenu;
+const scanner14 = createSurfaceScanner();
+scanner14.setTintScale(0.3);
+scanner14.add(portaledMenu);
+check("a portaled menu is normalized too", portaledMenu.style.backgroundColor, "rgba(255, 255, 255, 0.55)");
+
+/* ── regression: popups are frosted before their first paint ─────────
+   The idle pass can land after a popup's first frame, and a surface that
+   paints once flat and once frosted is the "glass appears after the popup"
+   flash. scanNow runs the same walk synchronously the moment the mutation
+   observer sees an out-of-flow mount; FIFO order tags the surface panels
+   (first levels of a portal root) before their deep content, and in-flow
+   mounts abort after the probe budget, leaving the idle pass in charge. */
+
+const popRow = makeEl({ bg: "rgba(80, 90, 120, 0.8)", w: 180, h: 40 });
+const popPanel = makeEl({ bg: "rgba(255, 255, 255, 0.85)", w: 220, h: 200, position: "fixed", children: [popRow] });
+const popRoot = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 220, h: 200, children: [popPanel] });
+sandbox.document.body = popRoot;
+const scanner15 = createSurfaceScanner();
+scanner15.setTintScale(0.3);
+scanner15.scanNow(popRoot);
+check("sync scan tags the popup panel pre-paint", popPanel.getAttribute(SURFACE_ATTR), "lg");
+check("sync scan normalizes the popup's nested fills pre-paint", popRow.style.backgroundColor, "rgba(80, 90, 120, 0.24)");
+check("sync scan leaves the popup's panel tint at the float floor", popPanel.style.backgroundColor, "rgba(255, 255, 255, 0.55)");
+
+// the settings dialog mounts as an inline fixed shell inside the sidebar;
+// the sync pass must tag its panel exactly like the idle pass does
+const syncDlgPanel = makeEl({ bg: "rgba(246, 247, 252, 0.85)", w: 800, h: 800 });
+const syncDlgShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position: "fixed", children: [syncDlgPanel] });
+sandbox.document.body = syncDlgShell;
+const scanner16 = createSurfaceScanner();
+scanner16.setTintScale(0.5);
+scanner16.scanNow(syncDlgShell);
+check("sync scan tags the dialog panel behind a transparent fixed shell", syncDlgPanel.getAttribute(SURFACE_ATTR), "lg");
+check("sync scan tints the dialog panel like the idle pass", syncDlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
+
+// an in-flow mount (streamed markdown) must not be dragged into the sync
+// path: the probe budget runs out before deep content, and the idle pass
+// finishes the job
+const deepPanel = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 400, h: 300 });
+let deepRoot = deepPanel;
+for (let d = 0; d < 60; d++) {
+  deepRoot = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 400, h: 300, children: [deepRoot] });
+}
+sandbox.document.body = deepRoot;
+const scanner17 = createSurfaceScanner();
+scanner17.scanNow(deepRoot);
+check("sync probe does not reach deep in-flow content", deepPanel.hasAttribute(SHEET_ATTR), false);
+scanner17.add(deepRoot);
+check("idle pass finishes the deep in-flow surface", deepPanel.hasAttribute(SHEET_ATTR), true);
+
+/* ── regression: theme switch re-tints without stripping ─────────────
+   The theme runtime rewrites every token as body inline styles. The old
+   retag stripped ALL markers first and rebuilt in idle slices: the frost
+   vanished the instant the strip ran and crept back over several frames —
+   the reported theme-switch "glass appears out of nothing" flash. The soft
+   retag keeps every marker (frost continuous, atomic for the first painted
+   frame) and only rewrites inline tints from the freshly computed colours. */
+
+const swRow = makeEl({ bg: "rgba(80, 90, 120, 0.8)", w: 380, h: 60 });
+const swPanel = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 420, h: 700, children: [swRow] });
+const swShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [swPanel] });
+sandbox.document.body = swShell;
+const scanner18 = createSurfaceScanner();
+scanner18.setTintScale(0.3);
+scanner18.add(swShell);
+check("switch fixture: panel is a sheet", swPanel.hasAttribute(SHEET_ATTR), true);
+check("switch fixture: row is tinted", swRow.style.backgroundColor, "rgba(80, 90, 120, 0.24)");
+// the theme runtime rewrites the tokens: same structure, new colours
+swPanel.computed.backgroundColor = "rgba(26, 33, 56, 0.7)";
+swRow.computed.backgroundColor = "rgba(30, 40, 70, 0.8)";
+scanner18.retag();
+check("theme switch keeps the sheet marker", swPanel.hasAttribute(SHEET_ATTR), true);
+check("theme switch re-tints the row from the new token colour", swRow.style.backgroundColor, "rgba(30, 40, 70, 0.24)");
+check("theme switch records the row's new original colour", swRow.getAttribute(TINT_ATTR), "rgba(30, 40, 70, 0.8)");
+
+// merges survive a theme switch: the pair paints one token, so it is still
+// a same-colour pair under the new tokens — the zeroing must not blink.
+// (The fake computed style does not apply the merge rule's transparent
+// background, so the test updates it the way a real engine would.)
+const swRepeat = makeEl({ bg: SURFACE_BG, w: 300, h: 100 });
+const swTraj = makeEl({ bg: SURFACE_BG, w: 420, h: 800, children: [swRepeat] });
+const swTrajShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [swTraj] });
+sandbox.document.body = swTrajShell;
+const scanner19 = createSurfaceScanner();
+scanner19.add(swTrajShell);
+check("switch fixture: repeat is zeroed", swRepeat.hasAttribute(MERGE_ATTR), true);
+swTraj.computed.backgroundColor = "rgba(20, 24, 40, 0.6)";
+swRepeat.computed.backgroundColor = "rgba(0, 0, 0, 0)";   // merge rule paints transparent
+scanner19.retag();
+check("theme switch keeps the repeat zeroed", swRepeat.hasAttribute(MERGE_ATTR), true);
+check("theme switch does not tint a merged repeat", swRepeat.hasAttribute(TINT_ATTR), false);
+
+// first activation: no markers exist yet, so retag degrades to a full
+// incremental scan instead of the soft re-tint
+const freshPanel = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 420, h: 700 });
+const freshShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [freshPanel] });
+sandbox.document.body = freshShell;
+const scanner20 = createSurfaceScanner();
+scanner20.setTintScale(0.3);
+scanner20.retag();
+check("first-activation retag tags surfaces", freshPanel.hasAttribute(SHEET_ATTR), true);
 
 /* ── nested fills are tinted, not stacked ─────────────────────────────
    A fill designed for an opaque plate only tints it. Over glass it tints AND
@@ -339,6 +527,9 @@ scanner5.setTintScale(0.3);
 scanner5.add(tintShell);
 
 check("nested fill is recorded with its original colour", row.getAttribute(TINT_ATTR), ROW_BG);
+// a nested fill with its own colour (a bubble inside the conversation sheet)
+// is a nested sheet now — every component gets the palette treatment
+check("nested fill with its own colour is tagged as a nested sheet", row.getAttribute(SHEET_ATTR), "lg");
 check("nested fill alpha is scaled", row.style.backgroundColor, "rgba(80, 90, 120, 0.24)");
 check("the surface itself is never tinted", tintPanel.hasAttribute(TINT_ATTR), false);
 
@@ -387,7 +578,7 @@ const hcShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [hov
 sandbox.document.body = hcShell;
 const scanner10 = createSurfaceScanner();
 scanner10.add(hcShell);
-check("hover card is tagged as a surface", hoverCard.getAttribute(SURFACE_ATTR), "sm");
+check("hover card is tagged as a surface", hoverCard.getAttribute(SURFACE_ATTR), "lg");
 check("hardcoded white title is rebound to the title token", hcTitle.style.color, "var(--dsh-glass-hovercard-title)");
 check("hardcoded grey time is rebound to the meta token", hcTime.style.color, "var(--dsh-glass-hovercard-meta)");
 check("hardcoded grey status is rebound to the caption token", hcStatus.style.color, "var(--dsh-glass-hovercard-caption)");
@@ -399,8 +590,45 @@ const otherShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [
 sandbox.document.body = otherShell;
 const scanner11 = createSurfaceScanner();
 scanner11.add(otherShell);
-check("an overlay not painted from the variable is tagged but untouched", otherCard.getAttribute(SURFACE_ATTR), "sm");
+check("an overlay not painted from the variable is tagged but untouched", otherCard.getAttribute(SURFACE_ATTR), "lg");
 check("its hardcoded text colour is left alone", otherTitle.style.color, "");
+
+/* ── teardown must leave no trace ─────────────────────────────────────
+   Everything the skin writes onto product elements is an inline style whose
+   value only means something while the skin is loaded: a scaled rgba() the
+   product never chose, and a `var(--dsh-glass-*)` colour that resolves to
+   *nothing* once the token layer is disposed (unstyled text). So stop() has
+   to clear the inline styles, not just the marker attributes. */
+
+const downRow = makeEl({ bg: ROW_BG, w: 380, h: 60 });
+const downTitle = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 200, h: 20, color: "rgb(255, 255, 255)" });
+const downCard = makeEl({
+  bg: "rgba(246, 247, 252, 0.852)", w: 244, h: 96, position: "fixed",
+  hovercardVar: "rgba(246, 247, 252, 0.852)", children: [downTitle]
+});
+const downPanel = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 420, h: 700, children: [downRow] });
+const downShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [downPanel, downCard] });
+
+sandbox.document.body = downShell;
+const scanner12 = createSurfaceScanner();
+scanner12.setTintScale(0.3);
+scanner12.add(downShell);
+check("teardown fixture: panel is a sheet", downPanel.hasAttribute(SHEET_ATTR), true);
+check("teardown fixture: row is tinted", downRow.style.backgroundColor, "rgba(80, 90, 120, 0.24)");
+check("teardown fixture: card ink is rebound", downTitle.style.color, "var(--dsh-glass-hovercard-title)");
+// the portaled card is normalized like every other float now
+check("teardown fixture: card fill is normalized", downCard.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
+
+scanner12.stop();
+check("stop() clears the sheet marker", downPanel.hasAttribute(SHEET_ATTR), false);
+check("stop() clears the surface marker", downCard.hasAttribute(SURFACE_ATTR), false);
+check("stop() restores the row's own background", downRow.style.backgroundColor, "");
+check("stop() clears the tint marker", downRow.hasAttribute(TINT_ATTR), false);
+check("stop() restores the card's own background", downCard.style.backgroundColor, "");
+check("stop() clears the card's tint marker", downCard.hasAttribute(TINT_ATTR), false);
+// the regression this pins: the var() would resolve to nothing after the
+// token layer is disposed, leaving the hover card's text unstyled
+check("stop() restores the hover card's own ink", downTitle.style.color, "");
 
 /* ── report ───────────────────────────────────────────────────────── */
 

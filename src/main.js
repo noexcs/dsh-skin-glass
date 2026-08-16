@@ -62,6 +62,16 @@ const DEFAULT_TRANSLUCENCY = 0.45;
  * surfaces the detector happens to find.
  */
 const REFRACT_ID = "dsh-glass-refract";
+
+/**
+ * Turbulence-driven displacement filter. The map must be independent of
+ * element size — it is applied to whatever surfaces the detector finds —
+ * and there is deliberately ONE strength: every tagged surface gets the
+ * palette's look (the command palette was the reference effect), so no
+ * size-based gradation. The 18px displacement reads as glass thickness on
+ * a large pane; on a small menu it warps the same absolute pixels, which
+ * the user prefers over a visibly weaker effect.
+ */
 const FILTER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0">` +
   `<filter id="${REFRACT_ID}" x="-15%" y="-15%" width="130%" height="130%" color-interpolation-filters="sRGB">` +
   `<feTurbulence type="fractalNoise" baseFrequency="0.006 0.010" numOctaves="2" seed="11" result="warp"/>` +
@@ -71,6 +81,15 @@ const FILTER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"
 
 const REFRACT_OK = typeof CSS !== "undefined" && typeof CSS.supports === "function" &&
   CSS.supports("backdrop-filter", `url(#${REFRACT_ID})`);
+
+/**
+ * The frost itself. One value, many declarations (unprefixed + `-webkit-`,
+ * across the overlay rule, the sheet pseudo, both refraction tiers and the
+ * reduced-transparency reset), so it is spelled once here and emitted
+ * through {@link backdrop}.
+ */
+const FROST = "blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)";
+const backdrop = (value) => `-webkit-backdrop-filter:${value};backdrop-filter:${value}`;
 
 const GLASS_TAG_ID = "dsh-skin-glass/chrome.css";
 const GLASS_CSS = [
@@ -87,9 +106,7 @@ const GLASS_CSS = [
   // out-of-flow overlays sit over *app content*: their own backdrop is what
   // makes a dialog show the content behind it instead of only tinting the
   // wallpaper
-  "html[data-dsh-glass] [data-dsh-glass-surface]{",
-  "-webkit-backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);",
-  "backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}",
+  `html[data-dsh-glass] [data-dsh-glass-surface]{${backdrop(FROST)}}`,
   // in-flow sheets (columns, cards, rows) frost the wallpaper through a
   // ::before pseudo: visually identical to a filter on the sheet itself, but
   // the sheet never becomes the containing block for the inline-rendered
@@ -97,9 +114,8 @@ const GLASS_CSS = [
   // `position: relative` anchors the pseudo's inset:0 to the sheet — it only
   // affects *absolute* descendants, never fixed ones.
   "html[data-dsh-glass] [data-dsh-glass-sheet]{position:relative}",
-  "html[data-dsh-glass] [data-dsh-glass-sheet]::before{content:'';position:absolute;inset:0;z-index:-1;pointer-events:none;border-radius:inherit;",
-  "-webkit-backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);",
-  "backdrop-filter:blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}",
+  "html[data-dsh-glass] [data-dsh-glass-sheet]::before{content:'';position:absolute;inset:0;z-index:-1;pointer-events:none;border-radius:inherit;" +
+    `${backdrop(FROST)}}`,
   // The conversation/workspace hover card (HoverCard primitive, portaled to
   // document.body) declares --dsw-hovercard-bg: #2C2C2E ON ITSELF — a local
   // custom property the body-level token override can never reach, which is
@@ -118,20 +134,19 @@ const GLASS_CSS = [
   // colour is opaque, but with translucency they compound into a solid block
   // (see MERGE_ATTR)
   "html[data-dsh-glass] [data-dsh-glass-merge]{background-color:transparent}",
-  // refraction, Chromium only — the detector withholds the "lg" value entirely
-  // when the engine cannot do it, so these rules simply never match elsewhere
-  "html[data-dsh-glass] [data-dsh-glass-surface=lg]{",
-  `-webkit-backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);`,
-  `backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}`,
-  "html[data-dsh-glass] [data-dsh-glass-sheet=lg]::before{",
-  `-webkit-backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04);`,
-  `backdrop-filter:url(#${REFRACT_ID}) blur(var(--dsh-surface-blur, 14px)) saturate(1.9) brightness(1.04)}`,
+  // refraction, Chromium only. Every tagged surface gets the same filter;
+  // when the engine cannot do url() backdrop filters the detector marks
+  // surfaces "plain" instead, so these rules never match there and the base
+  // frost rule above still applies — important because an unresolvable
+  // url() would invalidate the whole backdrop-filter value, not just the
+  // one function
+  `html[data-dsh-glass] [data-dsh-glass-surface=lg]{${backdrop(`url(#${REFRACT_ID}) ${FROST}`)}}`,
+  `html[data-dsh-glass] [data-dsh-glass-sheet=lg]::before{${backdrop(`url(#${REFRACT_ID}) ${FROST}`)}}`,
   // honour the OS "reduce transparency" setting (translucency is also forced
   // to its most legible end from JS, which can reach the token layer)
   "@media (prefers-reduced-transparency: reduce){",
   "html[data-dsh-glass] [data-dsh-glass-surface],",
-  "html[data-dsh-glass] [data-dsh-glass-sheet]::before{",
-  "-webkit-backdrop-filter:none;backdrop-filter:none}}"
+  `html[data-dsh-glass] [data-dsh-glass-sheet]::before{${backdrop("none")}}}`
 ].join("\n");
 
 function ensureChromeTag() {
@@ -165,17 +180,20 @@ function ensureFilterHost() {
 
    So the question is asked of the rendered result instead: an element whose
    *computed* background-color is translucent is a glass surface, whichever
-   class it happens to carry this build. Tagging stops at the first match so
-   only the outermost surface is marked — nesting backdrop-filters would
-   compound the blur into mud and multiply the cost — but descent continues,
-   because a fixed-position overlay nested inside glass is exactly what has
-   to be found (see unglassAncestors).
+   class it happens to carry this build. Every surface gets the palette
+   treatment, nested or not — the only exception is a fill that *repeats the
+   parent surface's own colour*, which is merged instead of tagged (tagging
+   it would re-introduce the opacity compounding the merge rule exists to
+   prevent). Descent always continues, because a fixed-position overlay
+   nested inside glass is exactly what has to be found (see
+   unglassAncestors).
 
    The marker comes in two kinds (see tagSurface): overlays (fixed/absolute,
    and in-flow panels nested inside an overlay shell) get
    `data-dsh-glass-surface`, which carries the backdrop-filter directly;
-   top-level in-flow sheets get `data-dsh-glass-sheet`, whose frost lives on
-   a `::before` pseudo instead — the sheet itself never becomes a containing
+   in-flow sheets (columns, cards, rows — top-level *or nested inside
+   another sheet*) get `data-dsh-glass-sheet`, whose frost lives on a
+   `::before` pseudo instead — the sheet itself never becomes a containing
    block, so a hover tooltip (an inline-rendered `position: fixed` bubble)
    is neither re-anchored nor triggers any glass stripping on mount. Both
    markers feed the nested-fill normalization (merge/tint). */
@@ -210,51 +228,67 @@ const MERGE_ATTR = "data-dsh-glass-merge";
  * value instead of the already-scaled one (and cannot scale it twice).
  */
 const TINT_ATTR = "data-dsh-glass-tint";
+/**
+ * Marks a node whose hardcoded text colour the skin has rebound to a
+ * hovercard token (see {@link treatHovercardText}). The value is an inline
+ * `var()`, which resolves to nothing once the token layer is disposed, so
+ * teardown has to be able to find these again.
+ */
+const INK_ATTR = "data-dsh-glass-ink";
+/** Everything the skin writes onto product elements, for teardown. */
+const MARKERS = [SURFACE_ATTR, SHEET_ATTR, MERGE_ATTR, TINT_ATTR, INK_ATTR];
+const MARKER_SELECTOR = MARKERS.map((attr) => `[${attr}]`).join(", ");
 /** Below this the fill is a hover tint, not a surface; above it, it is opaque. */
 const SURFACE_MIN_ALPHA = 0.2;
 const SURFACE_MAX_ALPHA = 0.995;
 const SURFACE_MIN_W = 44;
 const SURFACE_MIN_H = 24;
-/** Refraction is reserved for surfaces big enough for the distortion to read. */
-const REFRACT_MIN_AREA = 45000;
 /** Elements processed per idle slice, so a long conversation cannot stall. */
 const SCAN_BUDGET = 2500;
+/**
+ * Freshly added subtrees get a synchronous pre-paint probe: a popup whose
+ * frost lands one frame late reads as "the glass appears after the popup",
+ * so out-of-flow mounts are tagged before they can ever paint untagged.
+ * The probe spends SYNC_PROBE elements deciding whether the mount is
+ * out-of-flow at all (streamed in-flow content keeps the idle path); the
+ * first out-of-flow element commits the scan to SYNC_BUDGET more elements
+ * so the popup's panels and nested fills are complete on the very first
+ * frame. Whatever the sync scan does not reach is still covered by the
+ * idle pass, which runs for every added subtree regardless.
+ */
+const SYNC_PROBE = 48;
+const SYNC_BUDGET = 400;
+/**
+ * Retags driven by body token writes are throttled: a theme switch is ONE
+ * batch in ONE observer callback and retags immediately (atomic, pre-paint),
+ * while a translucency drag rewrites tokens at input rate and only needs
+ * occasional passes (the leading edge plus a trailing catch-up).
+ */
+const RETAG_THROTTLE_MS = 200;
 
-function alphaOf(color) {
-  const m = /^rgba?\(([^)]+)\)$/.exec(color);
-  if (m === null) return 1;
-  const parts = m[1].split(",");
-  return parts.length > 3 ? Number(parts[3]) : 1;
-}
-
-/** Split "rgba(r, g, b, a)" into numbers, or null if it is not that shape. */
-function parseColor(color) {
-  const m = /^rgba?\(([^)]+)\)$/.exec(color);
-  if (m === null) return null;
-  const parts = m[1].split(",").map((s) => Number(s.trim()));
-  if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n))) return null;
-  return { rgb: parts.slice(0, 3), a: parts.length > 3 ? parts[3] : 1 };
-}
+/* Computed-colour parsing lives in src/color.cjs — referenced through
+   `glassColor` (never a top-level alias) because the bundle inlines
+   color.cjs into the same scope as this file. */
 
 /**
- * Repaint a nested fill at a fraction of its alpha, so it tints the glass
- * instead of thickening it. Written as an inline style because the value is
+ * Repaint a fill at a fraction of its alpha, so it tints the glass instead
+ * of thickening it. Written as an inline style because the value is
  * per-element; the original colour rides along in the attribute so the next
  * pass can tell "already scaled" from "needs scaling".
- * @returns the element's original background colour.
+ * @param floor - the scaled alpha may not drop below this; nested fills pass
+ *   0 (the stack under them already carries the floor), a float's own fill
+ *   passes {@link glassColor.floatTintFloor} so its text stays legible.
  */
-function scaleNestedTint(el, bg, scale) {
-  const original = el.getAttribute(TINT_ATTR);
-  if (original !== null) return original;      // already ours; never compound
-  if (scale >= 1) return bg;
+function scaleNestedTint(el, bg, scale, floor) {
+  if (scale >= 1) return;
+  if (el.hasAttribute(TINT_ATTR)) return;      // already ours; never compound
   // a background the product set inline is not ours to rewrite
-  if (el.style.backgroundColor !== "") return bg;
-  const parsed = parseColor(bg);
-  if (parsed === null || parsed.a <= 0 || parsed.a >= 1) return bg;
+  if (el.style.backgroundColor !== "") return;
+  const parsed = glassColor.parseColor(bg);
+  if (parsed === null || parsed.a <= 0 || parsed.a >= 1) return;
   el.setAttribute(TINT_ATTR, bg);
-  const scaled = Math.round(parsed.a * scale * 1000) / 1000;
+  const scaled = Math.round(Math.max(floor, parsed.a * scale) * 1000) / 1000;
   el.style.setProperty("background-color", `rgba(${parsed.rgb.join(", ")}, ${scaled})`);
-  return bg;
 }
 
 /** The product's HoverCard declares this locally and paints its background
@@ -280,11 +314,12 @@ const HOVERCARD_TEXT_MAP = [
  * that merely *inherits* the variable (menus, dialogs) paints a different
  * background and fails the test.
  */
+const round2 = (x) => Math.round(x * 100) / 100;
+
 function paintsHovercardBg(el, cs) {
-  const own = parseColor(cs.backgroundColor);
-  const ref = parseColor(cs.getPropertyValue(HOVERCARD_VAR));
+  const own = glassColor.parseColor(cs.backgroundColor);
+  const ref = glassColor.parseColor(cs.getPropertyValue(HOVERCARD_VAR));
   if (own === null || ref === null || ref.a <= 0) return false;
-  const round2 = (x) => Math.round(x * 100) / 100;
   return round2(own.a) === round2(ref.a) && own.rgb.every((v, i) => v === ref.rgb[i]);
 }
 
@@ -294,7 +329,9 @@ function paintsHovercardBg(el, cs) {
  * on its light surface; dark mode resolves to the exact hardcoded values, so
  * the dark look is unchanged. Values are inline `var()`s, so the light/dark
  * switch is followed with no reapplication; a colour the product set inline
- * is left alone, like the nested-fill rule.
+ * is left alone, like the nested-fill rule. Rebound nodes are marked so the
+ * teardown path can find them again — the `var()`s resolve to nothing once
+ * the token layer is disposed.
  */
 function treatHovercardText(card) {
   const walk = (node) => {
@@ -302,6 +339,7 @@ function treatHovercardText(card) {
     for (const [from, to] of HOVERCARD_TEXT_MAP) {
       if (cs.color === from && node.style.color === "") {
         node.style.setProperty("color", to);
+        node.setAttribute(INK_ATTR, "");
         break;
       }
     }
@@ -310,33 +348,29 @@ function treatHovercardText(card) {
   walk(card);
 }
 
-/**
- * Walk up looking for an ancestor carrying a real backdrop-filter
- * (`data-dsh-glass-surface` only — sheets have no filter and cannot
- * re-anchor fixed descendants). Attributes only, no style.
- */
-function hasGlassAncestor(el) {
-  let p = el.parentElement;
-  while (p !== null) {
-    if (p.hasAttribute(SURFACE_ATTR)) return true;
-    p = p.parentElement;
-  }
-  return false;
-}
+/** How many ancestors a bounded upward scan inspects. */
+const ANCESTOR_SCAN = 12;
 
 /**
- * Attribute-only check for "inside a marked glass region" (sheet or
- * surface), bounded like {@link tagSurface}'s ancestor scan. The drain uses
- * it to apply nested-fill tinting to subtrees that entered the DOM through
- * the mutation observer, whose walk starts outside the glass context — the
- * settings dialog is the canonical case: its panel and mask sit inside the
- * sidebar's sheet region, so their fills must be scaled like any other
- * nested fill or the dialog stops being see-through.
+ * Carries a *real* backdrop-filter, and so is a containing block for its
+ * `position: fixed` descendants. Sheets are deliberately excluded: their
+ * frost rides a `::before` pseudo, which re-anchors nothing.
  */
-function hasGlassRegionAncestor(el) {
+const isGlassOverlay = (el) => el.hasAttribute(SURFACE_ATTR);
+/** Carries either marker, i.e. sits inside a region the skin has claimed. */
+const isGlassRegion = (el) => el.hasAttribute(SURFACE_ATTR) || el.hasAttribute(SHEET_ATTR);
+/** Out of flow: over app content rather than on the wallpaper. */
+const isOutOfFlow = (cs) => cs.position === "fixed" || cs.position === "absolute";
+
+/**
+ * Walk up at most `limit` ancestors looking for one that satisfies `hit`.
+ * Attributes only, never computed style, so this is cheap enough to run for
+ * every element the scanner visits.
+ */
+function hasAncestor(el, limit, hit) {
   let p = el.parentElement;
-  for (let i = 0; p !== null && i < ANCESTOR_SCAN; i++) {
-    if (p.hasAttribute(SURFACE_ATTR) || p.hasAttribute(SHEET_ATTR)) return true;
+  for (let i = 0; p !== null && i < limit; i++) {
+    if (hit(p)) return true;
     p = p.parentElement;
   }
   return false;
@@ -360,7 +394,7 @@ function unglassAncestors(el) {
   const stripped = [];
   let p = el.parentElement;
   while (p !== null) {
-    if (p.hasAttribute(SURFACE_ATTR)) {
+    if (isGlassOverlay(p)) {
       stripped.push({ ancestor: p, value: p.getAttribute(SURFACE_ATTR) });
       p.removeAttribute(SURFACE_ATTR);
     }
@@ -369,9 +403,6 @@ function unglassAncestors(el) {
   return stripped;
 }
 
-/** How many ancestors an in-flow candidate checks before calling itself a sheet. */
-const ANCESTOR_SCAN = 12;
-
 /**
  * Tag one element if it is a glass surface.
  * @param suspended - elements currently holding a fixed-position overlay,
@@ -379,42 +410,62 @@ const ANCESTOR_SCAN = 12;
  * @param computed - reuse of the caller's getComputedStyle, when it has one.
  * @returns true when tagged, which tells the caller to stop descending.
  */
-function tagSurface(el, suspended, computed) {
-  if (suspended !== undefined && suspended.has(el)) return false;
-  const cs = computed !== undefined ? computed : getComputedStyle(el);
-  const alpha = alphaOf(cs.backgroundColor);
-  if (!(alpha >= SURFACE_MIN_ALPHA && alpha <= SURFACE_MAX_ALPHA)) return false;
+/**
+ * Classify one element as a glass surface, WITHOUT writing any attribute.
+ * Pure so the QA probe (scripts/qa/probe-panels.mjs) can drive the exact
+ * same classifier the scanner uses instead of maintaining a hand copy —
+ * that copy had already drifted (stale tiering and suppression rules).
+ * @returns { kind: "surface" | "sheet", tier: string } | null
+ */
+function decideSurface(el, cs) {
+  const alpha = glassColor.alphaOf(cs.backgroundColor);
+  if (!(alpha >= SURFACE_MIN_ALPHA && alpha <= SURFACE_MAX_ALPHA)) return null;
   const rect = el.getBoundingClientRect();
-  if (rect.width < SURFACE_MIN_W || rect.height < SURFACE_MIN_H) return false;
+  if (rect.width < SURFACE_MIN_W || rect.height < SURFACE_MIN_H) return null;
   // A surface that fills the viewport has nothing behind it but the wallpaper,
   // which is already blurred — it would pay the largest backdrop cost in the
   // app for no visible gain. Skip it, but keep descending.
-  if (rect.width >= innerWidth * 0.92 && rect.height >= innerHeight * 0.92) return false;
-  const large = rect.width * rect.height >= REFRACT_MIN_AREA;
-  const tier = large && REFRACT_OK ? "lg" : "sm";
+  if (rect.width >= innerWidth * 0.92 && rect.height >= innerHeight * 0.92) return null;
+  // Every tagged surface refracts with the same filter; "plain" withholds
+  // the url() entirely where the engine cannot run it (see REFRACT_OK).
+  const tier = REFRACT_OK ? "lg" : "plain";
   // Out-of-flow overlays sit over app content and take the filter directly.
-  if (cs.position === "fixed" || cs.position === "absolute") {
-    el.setAttribute(SURFACE_ATTR, tier);
-    return true;
-  }
-  // In-flow element. Inside an already-marked glass region it belongs to the
-  // outer marker. Inside a fixed/absolute overlay wrapper whose own box is
-  // transparent (the settings dialog's shell), its backdrop is *app content*,
-  // so it needs the real filter too — a pseudo would be buried under the
-  // overlay's mask and lose the frost. Only top-level in-flow sheets
-  // (columns, cards) get the pseudo frost, which keeps the sheet from being
-  // the containing block for the inline fixed tooltip bubbles inside it.
+  if (isOutOfFlow(cs)) return { kind: "surface", tier };
+  // In-flow element. Every surface gets the palette treatment, nested or
+  // not: inside an already-marked glass region it still gets its own sheet
+  // pseudo — the pseudo carries the frost, so the outer sheet remains a
+  // plain containing block for the inline fixed tooltip bubbles inside it.
+  // (The walk only skips tagging for a fill that *repeats the parent
+  // surface's own colour* — the merge rule — because tagging those would
+  // re-introduce the opacity compounding the merge exists to prevent.)
+  // Inside a fixed/absolute overlay wrapper whose own box is transparent
+  // (the settings dialog's shell), the backdrop is *app content*, so the
+  // element needs the real filter — a pseudo would be buried under the
+  // overlay's mask and lose the frost.
   let p = el.parentElement;
   for (let i = 0; p !== null && i < ANCESTOR_SCAN; i++) {
-    if (p.hasAttribute(SURFACE_ATTR) || p.hasAttribute(SHEET_ATTR)) return false;
-    const pos = getComputedStyle(p).position;
-    if (pos === "fixed" || pos === "absolute") {
-      el.setAttribute(SURFACE_ATTR, tier);
-      return true;
+    if (isOutOfFlow(getComputedStyle(p)) && !isGlassRegion(p)) {
+      return { kind: "surface", tier };
     }
     p = p.parentElement;
   }
-  el.setAttribute(SHEET_ATTR, tier);
+  return { kind: "sheet", tier };
+}
+
+/**
+ * Tag one element if it is a glass surface: {@link decideSurface} plus the
+ * attribute write, gated on the suspension set.
+ * @param suspended - elements currently holding a fixed-position overlay,
+ *   for which glass is on hold (see {@link unglassAncestors}).
+ * @param computed - reuse of the caller's getComputedStyle, when it has one.
+ * @returns true when tagged, which tells the caller the element is a surface.
+ */
+function tagSurface(el, suspended, computed) {
+  if (suspended !== undefined && suspended.has(el)) return false;
+  const cs = computed !== undefined ? computed : getComputedStyle(el);
+  const decision = decideSurface(el, cs);
+  if (decision === null) return false;
+  el.setAttribute(decision.kind === "surface" ? SURFACE_ATTR : SHEET_ATTR, decision.tier);
   return true;
 }
 
@@ -450,39 +501,153 @@ function createSurfaceScanner() {
   /**
    * Release ancestors whose overlay has unmounted: each ancestor gets its
    * exact marker value back from the suspension snapshot, then a normal
-   * re-scan normalizes nested fills added while it was suspended.
+   * re-scan normalizes nested fills added while it was suspended. Called
+   * from {@link drain}, so the re-queued ancestors are picked up by the very
+   * pass that released them.
    */
   const sweepSuspensions = () => {
     if (suspensions.length === 0) return;
     const kept = [];
+    const gone = [];
     const stillHeld = new Set();
-    let dropped = false;
     for (const entry of suspensions) {
       if (entry.fixed.isConnected) {
         kept.push(entry);
         for (const { ancestor } of entry.stripped) stillHeld.add(ancestor);
       } else {
-        dropped = true;
+        gone.push(entry);
       }
     }
-    if (!dropped) return;
-    const released = [];
-    for (const entry of suspensions) {
-      if (entry.fixed.isConnected) continue;
-      for (const { ancestor, value } of entry.stripped) {
-        if (!stillHeld.has(ancestor) && ancestor.isConnected) {
-          ancestor.setAttribute(SURFACE_ATTR, value);
-          released.push(ancestor);
-        }
-      }
-    }
+    if (gone.length === 0) return;
     suspensions = kept;
     suspended = stillHeld;
-    for (const ancestor of released) push(ancestor, false, null);
-    if (released.length > 0) schedule();
+    // an ancestor can appear in several dropped entries; restore it once
+    const released = new Set();
+    for (const entry of gone) {
+      for (const { ancestor, value } of entry.stripped) {
+        if (stillHeld.has(ancestor) || released.has(ancestor) || !ancestor.isConnected) continue;
+        ancestor.setAttribute(SURFACE_ATTR, value);
+        released.add(ancestor);
+      }
+    }
+    for (const ancestor of released) push(ancestor, false, null, false);
   };
 
-  const push = (el, inGlass, surfaceColor) => queue.push({ el, inGlass, surfaceColor });
+  /**
+   * Entries are { el, inGlass, surfaceColor, tintCtx }: `inGlass` suppresses
+   * tagging (not descent), `surfaceColor` is the nearest painted background
+   * above, against which repeats are detected, and `tintCtx` marks a subtree
+   * whose fills are normalized by {@link glassColor.nestedTintScale} even
+   * though the walk is not inside a marked glass region.
+   */
+  const push = (el, inGlass, surfaceColor, tintCtx) =>
+    queue.push({ el, inGlass, surfaceColor, tintCtx, soft: false });
+
+  /**
+   * Process one queue entry: classify, tag/normalize, and enqueue children
+   * into `sink` (the idle pass and the synchronous pre-paint pass share
+   * this, so a popup tagged before its first paint is classified by exactly
+   * the code that tags it on the idle path). Entries flagged `soft` are the
+   * retag walk after a token change: markers are kept instead of re-decided
+   * and only inline tints are rewritten (see retag). @returns whether the
+   * element is out of flow — scanNow's probe uses that to tell a mounted
+   * popup apart from streamed in-flow content.
+   */
+  const visit = (entry, sink) => {
+    const el = entry.el;
+    if (!el.isConnected) return false;
+    const soft = entry.soft === true;
+    let inGlass = entry.inGlass;
+    let surfaceColor = entry.surfaceColor;
+    let tintCtx = entry.tintCtx === true;
+    if (soft && el.hasAttribute(TINT_ATTR)) {
+      // tokens changed under our feet: the inline scale holds a colour from
+      // the old mode — drop it so the fresh token value is read below
+      el.style.removeProperty("background-color");
+      el.removeAttribute(TINT_ATTR);
+    }
+    const cs = getComputedStyle(el);
+    const outOfFlow = isOutOfFlow(cs);
+    if (!soft && cs.position === "fixed" && !suspended.has(el)) {
+      // only glass *overlays* (data-dsh-glass-surface) carry a filter, so
+      // this only ever fires for fixed elements inside them; the release
+      // path restores the snapshot verbatim
+      suspend(el);
+    }
+    // An out-of-flow shell that is not itself glass (the settings dialog's
+    // transparent fixed wrapper, a body-level portal root) takes its
+    // content OFF the sheet's backdrop: reset the glass context so panels
+    // inside it get their own marker instead of being suppressed as nested
+    // fills — otherwise a retag while the dialog is open would strip the
+    // panel's frost for good. It also starts a *tint context*: the panels
+    // inside mount over app content rather than wallpaper, and their fill
+    // is normalized like a nested fill's, so a dialog's surface reads the
+    // same translucency as a palette mounted inside a sheet region instead
+    // of keeping its full token alpha (the 0.85-vs-0.58 split the skin
+    // used to show).
+    if (outOfFlow && !isGlassRegion(el)) {
+      inGlass = false;
+      surfaceColor = null;
+      tintCtx = true;
+    }
+    // an element we already tinted reports its scaled colour, so recover the
+    // original for both the repeat test and what children compare against
+    // (the soft walk pre-cleared its own tint above, so nothing to recover)
+    const tinted = soft ? null : el.getAttribute(TINT_ATTR);
+    const bg = tinted !== null ? tinted : cs.backgroundColor;
+    // a fill that *repeats the parent surface's own colour* is merged
+    // rather than tagged: tagging it would re-introduce the opacity
+    // compounding the merge rule exists to prevent (the trajectory panel)
+    const repeats = inGlass && surfaceColor !== null && bg === surfaceColor;
+    // Descent continues past a glass surface even though tagging stops:
+    // pruning would be cheaper, but a fixed-position overlay nested inside
+    // glass is exactly what has to be found, and pruning would hide it.
+    // In the soft walk the markers are kept: a token change moves colours,
+    // not geometry — no surface appears or disappears, no merge un-merges
+    // (a merged pair paints one token, so it is still a same-colour pair
+    // under the new tokens) — and keeping them is what makes a theme switch
+    // atomic instead of a strip-then-rebuild blink.
+    const tagged = soft ? isGlassRegion(el) : !repeats && tagSurface(el, suspended, cs);
+    // the hover card paints its background from --dsw-hovercard-bg (its only
+    // consumer); once tagged as a glass surface, its hardcoded light-on-dark
+    // text palette is rebound to the per-mode hovercard tokens, so light mode
+    // matches the rename/settings dialog material and dark mode is unchanged
+    if (!soft && tagged && outOfFlow && paintsHovercardBg(el, cs)) {
+      treatHovercardText(el);
+    }
+    // A walk that starts outside the glass context (the mutation observer's
+    // add()) still tints nested fills when the element sits inside a marked
+    // glass region — otherwise a dialog panel mounted inside the sidebar's
+    // sheet region would compound to opacity. Bounded like tagSurface's own
+    // ancestor scan. The tint context covers the same need for subtrees the
+    // walk entered through an unmarked out-of-flow shell.
+    const inTintCtx = () => tintCtx || inGlass || hasAncestor(el, ANCESTOR_SCAN, isGlassRegion);
+    let childColor = surfaceColor;
+    if (tagged) {
+      // A float's own fill is scaled toward the nested tint with the float
+      // floor (its backdrop is wallpaper/app content); a surface nested
+      // inside glass keeps the plain nested scale — the stack under it
+      // already carries the legibility floor.
+      const floor = inGlass ? 0 : glassColor.floatTintFloor;
+      if (inTintCtx()) scaleNestedTint(el, bg, tintScale, floor);
+      childColor = bg;
+    } else if (!soft && repeats) {
+      el.setAttribute(MERGE_ATTR, "");   // repeat of the surface's own colour
+    } else if (glassColor.alphaOf(bg) > 0) {
+      // a new painted layer: tint it rather than let it add opacity, and
+      // make it the reference its own children compare against
+      if (inTintCtx()) scaleNestedTint(el, bg, tintScale, 0);
+      childColor = bg;
+    }
+    for (const child of el.children) sink.push({
+      el: child,
+      inGlass: inGlass || tagged,
+      surfaceColor: childColor,
+      tintCtx: tintCtx || tagged,
+      soft
+    });
+    return outOfFlow;
+  };
 
   const drain = () => {
     scheduled = false;
@@ -490,63 +655,8 @@ function createSurfaceScanner() {
     sweepSuspensions();
     let budget = SCAN_BUDGET;
     while (queue.length > 0 && budget > 0) {
-      const entry = queue.pop();
-      const el = entry.el;
-      let inGlass = entry.inGlass;
-      let surfaceColor = entry.surfaceColor;
       budget -= 1;
-      if (!el.isConnected) continue;
-      const cs = getComputedStyle(el);
-      if (cs.position === "fixed" && !suspended.has(el)) {
-        // only glass *overlays* (data-dsh-glass-surface) carry a filter, so
-        // this only ever fires for fixed elements inside them; the release
-        // path restores the snapshot verbatim
-        suspend(el);
-      }
-      // An out-of-flow shell that is not itself glass (the settings dialog's
-      // transparent fixed wrapper, an unmarked absolute container) takes its
-      // content OFF the sheet's backdrop: reset the glass context so panels
-      // inside it get their own marker instead of being suppressed as nested
-      // fills — otherwise a retag while the dialog is open would strip the
-      // panel's frost for good.
-      if ((cs.position === "fixed" || cs.position === "absolute") &&
-          !el.hasAttribute(SURFACE_ATTR) && !el.hasAttribute(SHEET_ATTR)) {
-        inGlass = false;
-        surfaceColor = null;
-      }
-      // Descent continues past a glass surface even though tagging stops:
-      // pruning would be cheaper, but a fixed-position overlay nested inside
-      // glass is exactly what has to be found, and pruning would hide it.
-      const tagged = !inGlass && tagSurface(el, suspended, cs);
-      // the hover card paints its background from --dsw-hovercard-bg (its only
-      // consumer); once tagged as a glass surface, its hardcoded light-on-dark
-      // text palette is rebound to the per-mode hovercard tokens, so light mode
-      // matches the rename/settings dialog material and dark mode is unchanged
-      if (tagged && (cs.position === "fixed" || cs.position === "absolute") && paintsHovercardBg(el, cs)) {
-        treatHovercardText(el);
-      }
-      // an element we already tinted reports its scaled colour, so recover the
-      // original for both the repeat test and what children compare against
-      const bg = el.getAttribute(TINT_ATTR) !== null ? el.getAttribute(TINT_ATTR) : cs.backgroundColor;
-      // A walk that starts outside the glass context (the mutation observer's
-      // add()) still tints nested fills when the element sits inside a marked
-      // glass region — otherwise a dialog panel mounted inside the sidebar's
-      // sheet region would compound to opacity. Short-circuits when the walk
-      // is already inside glass.
-      const inRegion = inGlass || hasGlassRegionAncestor(el);
-      let childColor = surfaceColor;
-      if (tagged) {
-        if (inRegion) scaleNestedTint(el, bg, tintScale);
-        childColor = bg;
-      } else if (inGlass && surfaceColor !== null && bg === surfaceColor) {
-        el.setAttribute(MERGE_ATTR, "");   // repeat of the surface's own colour
-      } else if (alphaOf(bg) > 0) {
-        // a new painted layer: tint it rather than let it add opacity, and
-        // make it the reference its own children compare against
-        if (inRegion) scaleNestedTint(el, bg, tintScale);
-        childColor = bg;
-      }
-      for (const child of el.children) push(child, inGlass || tagged, childColor);
+      visit(queue.pop(), queue);
     }
     if (queue.length > 0) schedule();
   };
@@ -558,15 +668,12 @@ function createSurfaceScanner() {
     else setTimeout(drain, 60);
   };
 
+  /** Remove every marker the skin has written, and the inline styles they own. */
   const stripTags = () => {
-    for (const el of document.querySelectorAll(`[${SURFACE_ATTR}], [${SHEET_ATTR}], [${MERGE_ATTR}], [${TINT_ATTR}]`)) {
-      el.removeAttribute(SURFACE_ATTR);
-      el.removeAttribute(SHEET_ATTR);
-      el.removeAttribute(MERGE_ATTR);
-      if (el.hasAttribute(TINT_ATTR)) {
-        el.removeAttribute(TINT_ATTR);
-        el.style.removeProperty("background-color");
-      }
+    for (const el of document.querySelectorAll(MARKER_SELECTOR)) {
+      if (el.hasAttribute(TINT_ATTR)) el.style.removeProperty("background-color");
+      if (el.hasAttribute(INK_ATTR)) el.style.removeProperty("color");
+      for (const attr of MARKERS) el.removeAttribute(attr);
     }
   };
 
@@ -587,8 +694,32 @@ function createSurfaceScanner() {
     /** Queue a subtree for tagging. */
     add(root) {
       if (stopped || root.nodeType !== 1) return;
-      push(root, false, null);
+      push(root, false, null, false);
       schedule();
+    },
+    /**
+     * Tag a freshly mounted out-of-flow subtree synchronously, so its frost
+     * exists on the very first painted frame: the idle pass can land after
+     * the popup's first paint, and a surface that paints once flat and once
+     * frosted is exactly the "glass appears after the popup" flash. FIFO
+     * order tags the surface panels — the first levels of a portal root —
+     * before their deep content. An in-flow mount (streamed markdown)
+     * aborts after SYNC_PROBE elements and keeps the idle path; whatever a
+     * committed scan does not reach is also covered by the idle pass, which
+     * the observer queues for every added subtree.
+     */
+    scanNow(root) {
+      if (stopped || root.nodeType !== 1) return;
+      const sink = [{ el: root, inGlass: false, surfaceColor: null, tintCtx: false }];
+      let budget = SYNC_PROBE;
+      let foundOverlay = false;
+      for (let i = 0; i < sink.length && budget > 0; i++) {
+        budget -= 1;
+        if (visit(sink[i], sink) && !foundOverlay) {
+          foundOverlay = true;
+          budget += SYNC_BUDGET;   // commit: tag the whole (bounded) subtree now
+        }
+      }
     },
     /**
      * Repair a freshly mounted subtree synchronously. The idle pass would get
@@ -599,21 +730,43 @@ function createSurfaceScanner() {
      * is the only place a filter can re-anchor a fixed descendant.
      */
     repairFixed(node) {
-      if (stopped || node.nodeType !== 1 || !hasGlassAncestor(node)) return;
-      const candidates = [node, ...node.children];
-      for (const el of candidates) {
+      if (stopped || node.nodeType !== 1 || !hasAncestor(node, Infinity, isGlassOverlay)) return;
+      if (getComputedStyle(node).position === "fixed") {
+        suspend(node);
+        return;
+      }
+      for (const el of node.children) {
         if (getComputedStyle(el).position !== "fixed") continue;
         suspend(el);
         return;
       }
     },
-    /** Drop every tag and start over — token values (and so alphas) changed. */
+    /**
+     * Re-normalize in place after the tokens changed (theme switch,
+     * translucency, first activation). The old path stripped every marker
+     * and rebuilt from scratch in idle slices: all frost vanished the
+     * instant the strip ran and crept back over several frames — the
+     * reported theme-switch "glass appears out of nothing" flash.
+     *
+     * Now the walk is *soft*: a token change moves colours, not geometry,
+     * so the surface/sheet markers stay put (no frost blink), merge markers
+     * stay put (a merged pair paints one token, so it is still a
+     * same-colour pair under the new tokens), and only the inline tints are
+     * rewritten from the freshly computed colours. It runs synchronously so
+     * the switch is atomic on the first painted frame. Entries already
+     * queued for the idle pass keep their incremental treatment — the soft
+     * walk only drains its own entries (top of the LIFO queue). With no
+     * markers at all (first activation), the walk degrades to a full
+     * incremental scan.
+     */
     retag() {
       if (stopped) return;
-      stripTags();
-      queue = [];
-      push(document.body, false, null);
-      schedule();
+      const soft = document.querySelectorAll(`[${SURFACE_ATTR}],[${SHEET_ATTR}]`).length > 0;
+      queue.push({ el: document.body, inGlass: false, surfaceColor: null, tintCtx: false, soft });
+      while (queue.length > 0 && queue[queue.length - 1].soft) {
+        visit(queue.pop(), queue);
+      }
+      if (queue.length > 0) schedule();
     },
     /** Drop every tag and go idle, without retiring the scanner. */
     clear() {
@@ -641,27 +794,60 @@ function loadImage(src) {
   });
 }
 
+/**
+ * Paint an image source onto a white-flattened w×h canvas and encode it:
+ * webp where the engine supports it, JPEG otherwise.
+ */
+function encodeImage(source, w, h) {
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const g = canvas.getContext("2d");
+  g.fillStyle = "#ffffff";
+  g.fillRect(0, 0, w, h);
+  g.drawImage(source, 0, 0, w, h);
+  // An unsupported type is not an error: toDataURL *silently* falls back to
+  // PNG, so asking for webp and catching a throw would never fire — and a
+  // 1920px PNG is several MB, which is what blows the localStorage quota.
+  // Detect by what came back, and fall through to JPEG instead.
+  const webp = canvas.toDataURL("image/webp", 0.88);
+  return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/jpeg", 0.88);
+}
+
 /** Downscale a picked file to a data URL (max 1920px, alpha flattened). */
 async function processImageFile(file) {
-  const img = await loadImage(URL.createObjectURL(file));
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(file);
+    try {
+      const scale = Math.min(1, MAX_DIM / Math.max(bitmap.width, bitmap.height));
+      const w = Math.max(1, Math.round(bitmap.width * scale));
+      const h = Math.max(1, Math.round(bitmap.height * scale));
+      const resized = bitmap.width === w && bitmap.height === h
+        ? bitmap
+        : await createImageBitmap(bitmap, { resizeWidth: w, resizeHeight: h });
+      try {
+        // explicit w/h on drawImage: even if the engine ignored the resize
+        // options, the canvas still downsamples to the exact target size
+        return encodeImage(resized, w, h);
+      } finally {
+        if (resized !== bitmap) resized.close();
+      }
+    } finally {
+      bitmap.close();
+    }
+  }
+  // engines without createImageBitmap: the blob-URL decode path
+  const url = URL.createObjectURL(file);
   try {
+    const img = await loadImage(url);
     const scale = Math.min(1, MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight));
     const w = Math.max(1, Math.round(img.naturalWidth * scale));
     const h = Math.max(1, Math.round(img.naturalHeight * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const g = canvas.getContext("2d");
-    g.fillStyle = "#ffffff";
-    g.fillRect(0, 0, w, h);
-    g.drawImage(img, 0, 0, w, h);
-    try {
-      return canvas.toDataURL("image/webp", 0.88);
-    } catch (_webp) {
-      return canvas.toDataURL("image/jpeg", 0.88);
-    }
+    return encodeImage(img, w, h);
   } finally {
-    URL.revokeObjectURL(img.src);
+    // revoked whether the decode resolved or threw: on the success path the
+    // bitmap is already decoded and no longer needs the blob URL
+    URL.revokeObjectURL(url);
   }
 }
 
@@ -725,13 +911,14 @@ const en = {
 /* ── settings row store ───────────────────────────────────────────── */
 
 const createRowStore = () => defineStore({
-  init: () => ({ image: "", blur: DEFAULT_BLUR, translucency: DEFAULT_TRANSLUCENCY, ready: false, status: "", error: "" }),
+  init: () => ({ ...DEFAULTS, status: "", error: "" }),
   actions: {
+    // `stored` is normalized at every entry point (readStored / commit), so
+    // the row takes it as-is
     sync: (d, value) => {
-      d.image = value && typeof value.image === "string" ? value.image : "";
-      d.blur = value && typeof value.blur === "number" ? value.blur : DEFAULT_BLUR;
-      d.translucency = value && typeof value.translucency === "number" ? value.translucency : DEFAULT_TRANSLUCENCY;
-      d.ready = true;
+      d.image = value.image;
+      d.blur = value.blur;
+      d.translucency = value.translucency;
     },
     status: (d, message) => {
       d.status = message;
@@ -816,20 +1003,29 @@ function GlassRow({ t, useStore, chooseFile, clearImage, setBlur, setTranslucenc
    state in localStorage) ─────────────────────────────────────────── */
 
 const STORAGE_KEY = "dsh-skin-glass:v1";
+const DEFAULTS = { image: "", blur: DEFAULT_BLUR, translucency: DEFAULT_TRANSLUCENCY };
 
-/** Per-field defaulting doubles as the migration for pre-translucency records. */
+/**
+ * Coerce an arbitrary record to the state shape, field by field. This is
+ * also the migration path: a record written before a field existed simply
+ * takes that field's default, so no version bump is ever needed.
+ */
+function normalize(value) {
+  const v = value !== null && typeof value === "object" ? value : {};
+  return {
+    image: typeof v.image === "string" ? v.image : DEFAULTS.image,
+    blur: typeof v.blur === "number" && isFinite(v.blur) ? v.blur : DEFAULTS.blur,
+    translucency: typeof v.translucency === "number" && isFinite(v.translucency)
+      ? v.translucency
+      : DEFAULTS.translucency
+  };
+}
+
 function readStored() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { image: "", blur: DEFAULT_BLUR, translucency: DEFAULT_TRANSLUCENCY };
-    const parsed = JSON.parse(raw);
-    return {
-      image: typeof parsed.image === "string" ? parsed.image : "",
-      blur: typeof parsed.blur === "number" ? parsed.blur : DEFAULT_BLUR,
-      translucency: typeof parsed.translucency === "number" ? parsed.translucency : DEFAULT_TRANSLUCENCY
-    };
+    return normalize(JSON.parse(localStorage.getItem(STORAGE_KEY)));
   } catch (_read) {
-    return { image: "", blur: DEFAULT_BLUR, translucency: DEFAULT_TRANSLUCENCY };
+    return { ...DEFAULTS };
   }
 }
 
@@ -877,7 +1073,7 @@ function apply(ctx) {
       persisted = false;
     }
     syncRow();
-    refresh(stored);
+    refresh();
     return persisted;
   };
 
@@ -892,17 +1088,18 @@ function apply(ctx) {
       blurPx: stored.blur,
       wallpaper: imageCache.wallpaper
     }));
-    // surface alphas just changed, so what counts as a glass surface — and how
-    // hard nested fills must be held back — changed with them
+    // surface alphas just changed, so how hard nested fills must be held back
+    // changed with them. No retag here: the theme presenter writes this token
+    // batch to <body> as inline styles (one observer callback), and the
+    // observer's requestRetag() runs the soft re-tint once those values are
+    // actually in the DOM — a walk against the old tokens would be wasted
+    // work that the old code paid on every slider commit.
     scanner.setTintScale(glassColor.nestedTintScale(t));
-    scanner.retag();
   };
 
-  /** Re-render the glass chrome and (re)apply the token layer. */
-  const refresh = (value) => {
-    const image = value && typeof value.image === "string" ? value.image : "";
-    const blur = value && typeof value.blur === "number" ? value.blur : DEFAULT_BLUR;
-    const t = value && typeof value.translucency === "number" ? value.translucency : DEFAULT_TRANSLUCENCY;
+  /** Re-render the glass chrome and (re)apply the token layer from `stored`. */
+  const refresh = () => {
+    const { image, blur } = stored;
     const root = document.documentElement;
     const escaped = image.replace(/"/g, '\\"');
     root.style.setProperty("--dsh-glass-image", image ? `url("${escaped}")` : "none");
@@ -912,13 +1109,14 @@ function apply(ctx) {
     root.style.setProperty("--dsh-surface-blur", `${Math.max(6, Math.round(blur * 0.7))}px`);
     // more glass to look through, more the light should bend through it
     const displacement = document.querySelector(`#${REFRACT_ID} feDisplacementMap`);
-    if (displacement !== null) displacement.setAttribute("scale", String(Math.round(8 + 30 * t)));
+    if (displacement !== null) displacement.setAttribute("scale", String(Math.round(8 + 30 * stored.translucency)));
     // the chrome stylesheet is gated on this attribute: with no image the skin
     // leaves the native theme completely untouched
     if (image) root.setAttribute("data-dsh-glass", "");
     else root.removeAttribute("data-dsh-glass");
     if (!image) {
       imageCache = null;
+      applySeq += 1;            // abandon any analysis still in flight
       scanner.clear();
       if (tokenDisposer) {
         tokenDisposer();
@@ -926,24 +1124,24 @@ function apply(ctx) {
       }
       return;
     }
-    if (imageCache) {
+    if (imageCache !== null && imageCache.src === image) {
       applyTokens();   // blur/translucency-only change: same image analysis
       return;
     }
     const seq = ++applySeq;
     analyzeImage(image).then((analysis) => {
       if (seq !== applySeq) return;
-      imageCache = analysis;
+      imageCache = { ...analysis, src: image };
       applyTokens();
     }).catch((err) => {
       if (seq !== applySeq) return;
       console.error("[dsh-skin-glass] analyzeImage failed:", err);
-      bound && bound.error("glass.error.decode");
+      if (bound) bound.error("glass.error.decode");
     });
   };
 
   // initial application from persisted state
-  refresh(stored);
+  refresh();
   console.log("[dsh-skin-glass] ready:", JSON.stringify({
     image: stored.image ? "set" : "none",
     blur: stored.blur,
@@ -971,17 +1169,80 @@ function apply(ctx) {
   // idle time rather than synchronously in the mutation callback.
   ctx.effect(() => {
     if (typeof MutationObserver !== "function") return () => {};
+    // Added subtrees are walked once immediately and once more after they
+    // settle: a component that mounts in a transient state (the composer
+    // card on some reloads) computes a non-surface background on the first
+    // walk and would otherwise never be revisited — the reported
+    // "composer glass missing on most reloads" race.
+    let pending = new Set();
+    let timer = null;
+    const flushPending = () => {
+      timer = null;
+      const nodes = pending;
+      pending = new Set();
+      for (const node of nodes) {
+        if (node.isConnected) scanner.add(node);
+      }
+    };
+    // Token writes land in ONE observer callback per batch (the presenter
+    // writes ~200 properties in a single task — measured), and the callback
+    // is a microtask before paint: retagging right here makes a theme
+    // switch atomic — the markers stay (soft retag, no strip), so the frost
+    // never blinks off. A translucency drag rewrites tokens at input rate,
+    // hence the leading-edge + trailing throttle: the last state always
+    // catches up, the intermediate ones coalesce.
+    let retagTimer = null;
+    let lastRetagAt = 0;
+    const requestRetag = () => {
+      const now = Date.now();
+      if (now - lastRetagAt >= RETAG_THROTTLE_MS) {
+        lastRetagAt = now;
+        scanner.retag();
+        return;
+      }
+      if (retagTimer === null) {
+        retagTimer = setTimeout(() => {
+          retagTimer = null;
+          lastRetagAt = Date.now();
+          scanner.retag();
+        }, RETAG_THROTTLE_MS);
+      }
+    };
     const observer = new MutationObserver((records) => {
       for (const record of records) {
         for (const node of record.addedNodes) {
           scanner.repairFixed(node);
+          // popups must be frosted on their very first paint: the idle pass
+          // can land a frame later, and the untagged first frame is the
+          // "glass appears after the popup" flash this guards against. The
+          // sync scan only commits when the mount is out-of-flow; in-flow
+          // content still rides the idle pass queued by add() below.
+          scanner.scanNow(node);
           scanner.add(node);
+          pending.add(node);
         }
         if (record.removedNodes.length > 0) scanner.checkReleases();
+        // The product's theme runtime writes the token layer as inline
+        // styles on body. A light/dark switch rewrites every token: without
+        // a re-walk the inline tints would stay in the old mode's colours
+        // (and the first activation would never get its markers at all).
+        if (record.type === "attributes" && record.target === document.body) {
+          requestRetag();
+        }
       }
+      if (timer === null) timer = setTimeout(flushPending, 350);
     });
-    observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style"]
+    });
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      if (retagTimer !== null) clearTimeout(retagTimer);
+      observer.disconnect();
+    };
   }, "dsh-skin-glass: surface observer");
 
   ctx.effect(() => ctx.locale.register(GLASS_NS, { zh, en }), "dsh-skin-glass: row dictionaries");
@@ -1031,6 +1292,35 @@ function apply(ctx) {
       };
     }
   }, GlassRow));
+}
+
+/* ── QA debug handle ─────────────────────────────────────────────────
+   The live probe (scripts/qa/probe-panels.mjs) drives the REAL classifier
+   through this instead of maintaining a hand copy that drifts. The sandbox
+   harnesses evaluate this file without a `window`, so the guard keeps them
+   unaffected. */
+if (typeof window !== "undefined") {
+  window.__dshGlass = {
+    decideSurface,
+    tagSurface,
+    createSurfaceScanner,
+    parseColor: glassColor.parseColor,
+    alphaOf: glassColor.alphaOf,
+    SURFACE_ATTR,
+    SHEET_ATTR,
+    MERGE_ATTR,
+    TINT_ATTR,
+    INK_ATTR,
+    SURFACE_MIN_ALPHA,
+    SURFACE_MAX_ALPHA,
+    SURFACE_MIN_W,
+    SURFACE_MIN_H,
+    ANCESTOR_SCAN,
+    isOutOfFlow,
+    isGlassRegion,
+    isGlassOverlay,
+    hasAncestor
+  };
 }
 
 exports.apply = apply;

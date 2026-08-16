@@ -61,6 +61,16 @@ function tune(rgb, lightness, saturation) {
   return hslToRgb(h, saturation === undefined ? s : Math.max(s, saturation), lightness);
 }
 
+/**
+ * Mix toward the accent but re-light the result to the base's own
+ * lightness. A dark plate keeps its depth (and its text contrast) while
+ * only taking the accent's hue — a plain RGB mix toward a bright accent
+ * (cyan) lightens the plate enough to drop white-on-dark contrast below AA.
+ */
+function mixL(base, accent, amt) {
+  return tune(mix(base, accent, amt), rgbToHsl(base[0], base[1], base[2])[2]);
+}
+
 /** "r, g, b" component string. */
 function rgbStr(rgb) {
   return `${rgb[0]}, ${rgb[1]}, ${rgb[2]}`;
@@ -78,25 +88,50 @@ function rgba(rgb, a) {
 }
 
 /**
+ * Split a computed-style colour into { rgb, a } numbers, or null when it is
+ * not the "rgb(r, g, b)" / "rgba(r, g, b, a)" shape. Shared by the runtime
+ * detector (src/main.js) and the contrast harness — the only parser that may
+ * exist, so the two can never drift.
+ */
+function parseColor(color) {
+  const m = /^rgba?\(([^)]+)\)$/.exec(color.trim());
+  if (m === null) return null;
+  const parts = m[1].split(",").map((s) => Number(s.trim()));
+  if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n))) return null;
+  const a = parts.length > 3 ? parts[3] : 1;
+  return { rgb: parts.slice(0, 3), a: Number.isFinite(a) ? a : 1 };
+}
+
+/** Alpha of a computed colour; anything unparseable counts as opaque. */
+function alphaOf(color) {
+  const parsed = parseColor(color);
+  return parsed === null ? 1 : parsed.a;
+}
+
+/**
  * k-means quantization over [r,g,b] samples.
  * @returns clusters [{r,g,b,count}] sorted by population descending.
  */
 function quantize(samples, k, iterations) {
-  k = Math.min(k, Math.max(1, samples.length));
   if (samples.length === 0) return [];
-  let centers = [];
+  k = Math.min(k, samples.length);
+  const centers = [];
   const stride = Math.max(1, Math.floor(samples.length / k));
   for (let i = 0; i < k; i++) centers.push(samples[Math.min(i * stride, samples.length - 1)].slice());
   const dist = (p, c) => (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2 + (p[2] - c[2]) ** 2;
+  const nearest = (p) => {
+    let best = 0;
+    let bd = Infinity;
+    for (let i = 0; i < k; i++) {
+      const d = dist(p, centers[i]);
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+  };
   for (let iter = 0; iter < iterations; iter++) {
     const sums = Array.from({ length: k }, () => [0, 0, 0, 0]);
     for (const p of samples) {
-      let best = 0;
-      let bd = Infinity;
-      for (let i = 0; i < k; i++) {
-        const d = dist(p, centers[i]);
-        if (d < bd) { bd = d; best = i; }
-      }
+      const best = nearest(p);
       sums[best][0] += p[0];
       sums[best][1] += p[1];
       sums[best][2] += p[2];
@@ -108,15 +143,7 @@ function quantize(samples, k, iterations) {
     }
   }
   const clusters = centers.map((c) => ({ r: Math.round(c[0]), g: Math.round(c[1]), b: Math.round(c[2]), count: 0 }));
-  for (const p of samples) {
-    let best = 0;
-    let bd = Infinity;
-    for (let i = 0; i < k; i++) {
-      const d = dist(p, centers[i]);
-      if (d < bd) { bd = d; best = i; }
-    }
-    clusters[best].count += 1;
-  }
+  for (const p of samples) clusters[nearest(p)].count += 1;
   return clusters.sort((a, b) => b.count - a.count);
 }
 
@@ -186,11 +213,16 @@ const BLACK = [0, 0, 0];
 /** Clamp to 0..1. */
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
+/** A finite number, or the fallback. */
+const num = (v, fallback) => (typeof v === "number" && isFinite(v) ? v : fallback);
+
 /** Default translucency when the caller passes nothing. */
 const DEFAULT_T = 0.45;
+/** Default wallpaper blur radius, mirroring main.js's DEFAULT_BLUR. */
+const DEFAULT_BLUR_PX = 18;
 
 /** Translucency 0..1 — 0 is the most legible (near-opaque), 1 the most see-through. */
-const clampT = (t) => Math.max(0, Math.min(1, typeof t === "number" && isFinite(t) ? t : DEFAULT_T));
+const clampT = (t) => clamp01(num(t, DEFAULT_T));
 
 /** One { light, dark } token pair. */
 const pair = (light, dark) => ({ light, dark });
@@ -216,6 +248,20 @@ function nestedTintScale(t) {
 }
 
 /**
+ * Floor for a *float's own* fill once it has been scaled toward the nested
+ * tint (the modal-shell tint context). Nested fills keep the full scale —
+ * their job is to stop compounding, and the stack under them already carries
+ * the legibility floor — but a standalone float's backdrop is wallpaper and
+ * app content, so its fill may not drop below this or its text stops
+ * clearing AA on hostile wallpapers (pinned by scripts/check-contrast.mjs).
+ * At the default translucency (0.45) the scaled alpha is 0.58, which sits
+ * above the floor: every float lands on the palette's original look
+ * unchanged, and the floor only engages at the see-through end of the
+ * slider.
+ */
+const FLOAT_TINT_FLOOR = 0.55;
+
+/**
  * Build the { light, dark } token pair table for the glass skin from one
  * accent color extracted from the background image.
  *
@@ -236,7 +282,7 @@ function nestedTintScale(t) {
 function buildTokens(accent, options = {}) {
   const a = accent;
   const t = clampT(options.t);
-  const blurPx = typeof options.blurPx === "number" && isFinite(options.blurPx) ? Math.max(0, options.blurPx) : 18;
+  const blurPx = Math.max(0, num(options.blurPx, DEFAULT_BLUR_PX));
   const aLight = tune(a, 0.5, 0.58);      // accent usable on light surfaces
   const aDark = tune(a, 0.74, 0.58);      // accent usable on dark surfaces
   const fillLight = `linear-gradient(135deg, ${rgb(tune(a, 0.5, 0.62))}, ${rgb(tune(a, 0.62, 0.68))})`;
@@ -266,14 +312,17 @@ function buildTokens(accent, options = {}) {
   // which is the floor a featureless black (light mode) or white (dark mode)
   // wallpaper still gets. A friendly image lands far below it and buys real
   // transparency back.
+  //
+  // The 1.6 weight on stdL is calibrated, not guessed: at 1.2 a busy
+  // mid-luminance wallpaper drove the dark-mode sidebar to 4.47:1, just under
+  // AA (scripts/check-contrast.mjs pins this).
+  const CONTRASTINESS_WEIGHT = 1.6;
   const wall = options.wallpaper;
-  const meanL = wall !== undefined && isFinite(wall.meanL) ? clamp01(wall.meanL) : undefined;
-  const stdL = wall !== undefined && isFinite(wall.stdL) ? clamp01(wall.stdL) : 0;
-  // The 1.6 on stdL is calibrated, not guessed: at 1.2 a busy mid-luminance
-  // wallpaper drove the dark-mode sidebar to 4.47:1, just under AA
-  // (scripts/check-contrast.mjs pins this).
-  const needLight = meanL === undefined ? 1 : clamp01(1 - meanL + 1.6 * stdL);
-  const needDark = meanL === undefined ? 1 : clamp01(meanL + 1.6 * stdL);
+  const known = wall !== null && typeof wall === "object" && isFinite(wall.meanL);
+  const meanL = known ? clamp01(wall.meanL) : 0;
+  const stdL = known ? clamp01(num(wall.stdL, 0)) : 0;
+  const needLight = known ? clamp01(1 - meanL + CONTRASTINESS_WEIGHT * stdL) : 1;
+  const needDark = known ? clamp01(meanL + CONTRASTINESS_WEIGHT * stdL) : 1;
   const scrim = pair(
     rgba(WHITE, 0.04 + t * 0.44 * needLight),
     rgba(SCRIM_DARK, 0.06 + t * 0.52 * needDark)
@@ -321,6 +370,54 @@ function buildTokens(accent, options = {}) {
   }
   statics["--dsw-static-deepseek-900"] = pair(rgb(tune(a, 0.22, 0.5)), rgb(tune(a, 0.26, 0.5)));
 
+  // Tier A/B/C as data: `glass(alpha)` builds a { light, dark } pair from a
+  // base colour + accent mix per mode. A zero mix is safe — mix(x, a, 0)
+  // returns x verbatim — so plain entries ride the same table.
+  const glass = (alpha) => (lb, lm, db, dm, delta = 0) =>
+    pair(rgba(mix(lb, a, lm), alpha + delta), rgba(mix(db, a, dm), alpha + delta));
+  const A = glass(aBase), S = glass(aSide), B = glass(aMid), C = glass(aTop);
+  const tierA = [
+    ["--dsw-alias-bg-base", A(WHITE, 0.06, NAVY, 0.14)],
+    ["--dsw-specific-sidebar-fill", S(PAPER, 0.05, [13, 17, 30], 0.07)],
+    ["--dsw-specific-sidebar-nav-item-hover", S(WHITE, 0.12, NAVY2, 0.2, 0.12)]
+  ];
+  const tierB = [
+    ["--dsw-alias-bg-layer-1", B(WHITE, 0, NAVY2, 0)],
+    ["--dsw-alias-bg-module-platform", B(PAPER, 0, NAVY2, 0.16)],
+    ["--dsw-alias-bg-multi-select", B(PAPER, 0, NAVY2, 0.16)],
+    ["--dsw-alias-button-elevated-fill", B(WHITE, 0, NAVY2, 0)],
+    ["--dsw-alias-button-floating-fill", B(WHITE, 0, NAVY2, 0)],
+    ["--dsw-alias-button-floating-hover", B(WHITE, 0.1, NAVY2, 0.18, 0.03)],
+    ["--dsw-alias-button-ghost-active-fill", B(WHITE, 0.14, NAVY2, 0.24)],
+    ["--dsw-alias-button-ghost-active-hover", B(WHITE, 0.2, NAVY2, 0.32, 0.03)],
+    ["--dsw-alias-button-primary-dimmed", B(WHITE, 0.2, NAVY2, 0.32, -0.14)],
+    ["--dsw-alias-button-tool-bar-fill", B(WHITE, 0.08, [60, 68, 96], 0.2)],
+    ["--dsw-alias-button-tool-bar-hover", B(WHITE, 0.14, [72, 80, 110], 0.2, 0.03)],
+    ["--dsw-alias-interactive-bg-hover-solid", B(WHITE, 0.08, NAVY2, 0.16)],
+    ["--dsw-alias-state-business-tertiary", B(WHITE, 0.2, NAVY2, 0.34, -0.2)],
+    ["--dsw-specific-bubble", B(WHITE, 0.09, NAVY2, 0.2)],
+    ["--dsw-specific-bubble-highlight", B(WHITE, 0.16, NAVY2, 0.3, 0.03)],
+    ["--dsw-specific-input-major", B(WHITE, 0, [18, 23, 41], 0, 0.02)],
+    ["--dsw-specific-login-input", B(PAPER, 0, [16, 21, 39], 0)],
+    ["--dsw-specific-selector", B(PAPER, 0, NAVY2, 0.16)],
+    ["--dsw-specific-tip", B(PAPER, 0, NAVY2, 0)],
+    ["--dsw-alias-markdown-code-block", B(WHITE, 0.04, NAVY, 0.1)],
+    ["--dsw-alias-markdown-code-block-banner", B(WHITE, 0.08, NAVY2, 0.14, 0.03)],
+    ["--dsw-alias-markdown-inline-code", B(WHITE, 0.14, NAVY2, 0.26)],
+    ["--dsw-alias-markdown-code-segment-selected", B(WHITE, 0, NAVY2, 0.22, 0.03)],
+    ["--dsw-alias-markdown-code-segment-unselected", B(WHITE, 0.06, NAVY, 0.12)],
+    ["--dsw-alias-markdown-citation", B(WHITE, 0.1, NAVY2, 0.16)],
+    ["--dsw-alias-markdown-placeholder", B(PAPER, 0, NAVY2, 0)],
+    ["--dsw-alias-markdown-tag", B(WHITE, 0.1, NAVY2, 0.18)]
+  ];
+  const tierC = [
+    ["--dsw-alias-bg-layer-2", C(PAPER, 0, NAVY, 0.08)],
+    ["--dsw-alias-bg-layer-3", C(WHITE, 0, NAVY2, 0.14)],
+    ["--dsw-specific-menu", C(WHITE, 0, [26, 33, 56], 0)],
+    ["--dsw-alias-toast-bg", C([24, 28, 38], 0, [26, 33, 56], 0)],
+    ["--dsw-alias-tooltip-bg", C([24, 28, 38], 0, [26, 33, 56], 0)]
+  ];
+
   return {
     ...statics,
     /* wallpaper + modal scrims (consumed by the chrome stylesheet and by the
@@ -342,49 +439,15 @@ function buildTokens(accent, options = {}) {
     "--dsw-alias-button-info-hover": pair(rgb(tune(a, 0.58, 0.6)), rgb(tune(a, 0.8, 0.6))),
     "--dsw-alias-state-business-primary": pair(rgb(aLight), rgb(aDark)),
 
-    /* tier A — see-through chrome */
-    "--dsw-alias-bg-base": pair(rgba(mix(WHITE, a, 0.06), aBase), rgba(mix(NAVY, a, 0.14), aBase)),
-    "--dsw-specific-sidebar-fill": pair(rgba(mix(PAPER, a, 0.05), aSide), rgba(mix([13, 17, 30], a, 0.07), aSide)),
-    "--dsw-specific-sidebar-nav-item-hover": pair(rgba(mix(WHITE, a, 0.12), aSide + 0.12), rgba(mix(NAVY2, a, 0.2), aSide + 0.12)),
+    /* tier A/B/C surface table: each row is
+       [token, lightBase, lightAccentMix, darkBase, darkAccentMix, delta],
+       where delta nudges the tier alpha for entries that sit slightly off
+       it. Irregular entries (accent-only fills, the mixL overlay) stay
+       inline below. */
+    ...Object.fromEntries([...tierA, ...tierB, ...tierC]),
     "--dsw-specific-sidebar-nav-item-active": pair(rgba(a, 0.18), rgba(a, 0.26)),
     "--dsw-specific-sidebar-nav-item-active-accent": pair(rgba(a, 0.26), rgba(a, 0.36)),
-
-    /* tier B — half-frosted reading surfaces */
-    "--dsw-alias-bg-layer-1": pair(rgba(WHITE, aMid), rgba(NAVY2, aMid)),
-    "--dsw-alias-bg-module-platform": pair(rgba(PAPER, aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
-    "--dsw-alias-bg-multi-select": pair(rgba(PAPER, aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
-    "--dsw-alias-button-elevated-fill": pair(rgba(WHITE, aMid), rgba(NAVY2, aMid)),
-    "--dsw-alias-button-floating-fill": pair(rgba(WHITE, aMid), rgba(NAVY2, aMid)),
-    "--dsw-alias-button-floating-hover": pair(rgba(mix(WHITE, a, 0.1), aMid + 0.03), rgba(mix(NAVY2, a, 0.18), aMid + 0.03)),
-    "--dsw-alias-button-ghost-active-fill": pair(rgba(mix(WHITE, a, 0.14), aMid), rgba(mix(NAVY2, a, 0.24), aMid)),
-    "--dsw-alias-button-ghost-active-hover": pair(rgba(mix(WHITE, a, 0.2), aMid + 0.03), rgba(mix(NAVY2, a, 0.32), aMid + 0.03)),
-    "--dsw-alias-button-primary-dimmed": pair(rgba(mix(WHITE, a, 0.2), aMid - 0.14), rgba(mix(NAVY2, a, 0.32), aMid - 0.14)),
-    "--dsw-alias-button-tool-bar-fill": pair(rgba(mix(WHITE, a, 0.08), aMid), rgba(mix([60, 68, 96], a, 0.2), aMid)),
-    "--dsw-alias-button-tool-bar-hover": pair(rgba(mix(WHITE, a, 0.14), aMid + 0.03), rgba(mix([72, 80, 110], a, 0.2), aMid + 0.03)),
-    "--dsw-alias-interactive-bg-hover-solid": pair(rgba(mix(WHITE, a, 0.08), aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
-    "--dsw-alias-state-business-tertiary": pair(rgba(mix(WHITE, a, 0.2), aMid - 0.2), rgba(mix(NAVY2, a, 0.34), aMid - 0.2)),
-    "--dsw-specific-bubble": pair(rgba(mix(WHITE, a, 0.09), aMid), rgba(mix(NAVY2, a, 0.2), aMid)),
-    "--dsw-specific-bubble-highlight": pair(rgba(mix(WHITE, a, 0.16), aMid + 0.03), rgba(mix(NAVY2, a, 0.3), aMid + 0.03)),
-    "--dsw-specific-input-major": pair(rgba(WHITE, aMid + 0.02), rgba([18, 23, 41], aMid + 0.02)),
-    "--dsw-specific-login-input": pair(rgba(PAPER, aMid), rgba([16, 21, 39], aMid)),
-    "--dsw-specific-selector": pair(rgba(PAPER, aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
-    "--dsw-specific-tip": pair(rgba(PAPER, aMid), rgba(NAVY2, aMid)),
-    "--dsw-alias-markdown-code-block": pair(rgba(mix(WHITE, a, 0.04), aMid), rgba(mix(NAVY, a, 0.1), aMid)),
-    "--dsw-alias-markdown-code-block-banner": pair(rgba(mix(WHITE, a, 0.08), aMid + 0.03), rgba(mix(NAVY2, a, 0.14), aMid + 0.03)),
-    "--dsw-alias-markdown-inline-code": pair(rgba(mix(WHITE, a, 0.14), aMid), rgba(mix(NAVY2, a, 0.26), aMid)),
-    "--dsw-alias-markdown-code-segment-selected": pair(rgba(WHITE, aMid + 0.03), rgba(mix(NAVY2, a, 0.22), aMid + 0.03)),
-    "--dsw-alias-markdown-code-segment-unselected": pair(rgba(mix(WHITE, a, 0.06), aMid), rgba(mix(NAVY, a, 0.12), aMid)),
-    "--dsw-alias-markdown-citation": pair(rgba(mix(WHITE, a, 0.1), aMid), rgba(mix(NAVY2, a, 0.16), aMid)),
-    "--dsw-alias-markdown-placeholder": pair(rgba(PAPER, aMid), rgba(NAVY2, aMid)),
-    "--dsw-alias-markdown-tag": pair(rgba(mix(WHITE, a, 0.1), aMid), rgba(mix(NAVY2, a, 0.18), aMid)),
-
-    /* tier C — floating reading surfaces (dialogs, menus, overlays) */
-    "--dsw-alias-bg-layer-2": pair(rgba(PAPER, aTop), rgba(mix(NAVY, a, 0.08), aTop)),
-    "--dsw-alias-bg-layer-3": pair(rgba(WHITE, aTop), rgba(mix(NAVY2, a, 0.14), aTop)),
-    "--dsw-alias-bg-overlay": pair(rgba(mix(WHITE, a, 0.14), aTop), rgba(mix(NAVY2, a, 0.26), aTop)),
-    "--dsw-specific-menu": pair(rgba(WHITE, aTop), rgba([26, 33, 56], aTop)),
-    "--dsw-alias-toast-bg": pair(rgba([24, 28, 38], aTop), rgba([26, 33, 56], aTop)),
-    "--dsw-alias-tooltip-bg": pair(rgba([24, 28, 38], aTop), rgba([26, 33, 56], aTop)),
+    "--dsw-alias-bg-overlay": pair(rgba(mix(WHITE, a, 0.14), aTop), rgba(mixL(NAVY2, a, 0.26), aTop)),
     // Hover card: light = the dialog-surface material (bg-layer-2, what the
     // rename/settings dialogs are made of), dark = the always-dark tooltip
     // plate. The card declares --dsw-hovercard-bg on ITSELF, so the chrome
@@ -434,17 +497,18 @@ function buildTokens(accent, options = {}) {
   };
 }
 
+/* The namespace the bundle and the check scripts consume. The conversion and
+   mixing helpers above are internal to the token builder; only the four
+   image→theme entry points and the compositing rule the detector shares with
+   scripts/check-contrast.mjs are exposed. */
 const glassColor = {
-  rgbToHsl,
-  hslToRgb,
-  mix,
-  tune,
-  rgb,
-  rgba,
+  parseColor,
+  alphaOf,
   quantize,
   pickAccent,
   analyzeWallpaper,
   nestedTintScale,
+  floatTintFloor: FLOAT_TINT_FLOOR,
   buildTokens
 };
 

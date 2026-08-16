@@ -412,6 +412,103 @@ scanner14.setTintScale(0.3);
 scanner14.add(portaledMenu);
 check("a portaled menu is normalized too", portaledMenu.style.backgroundColor, "rgba(255, 255, 255, 0.55)");
 
+/* ── regression: popups are frosted before their first paint ─────────
+   The idle pass can land after a popup's first frame, and a surface that
+   paints once flat and once frosted is the "glass appears after the popup"
+   flash. scanNow runs the same walk synchronously the moment the mutation
+   observer sees an out-of-flow mount; FIFO order tags the surface panels
+   (first levels of a portal root) before their deep content, and in-flow
+   mounts abort after the probe budget, leaving the idle pass in charge. */
+
+const popRow = makeEl({ bg: "rgba(80, 90, 120, 0.8)", w: 180, h: 40 });
+const popPanel = makeEl({ bg: "rgba(255, 255, 255, 0.85)", w: 220, h: 200, position: "fixed", children: [popRow] });
+const popRoot = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 220, h: 200, children: [popPanel] });
+sandbox.document.body = popRoot;
+const scanner15 = createSurfaceScanner();
+scanner15.setTintScale(0.3);
+scanner15.scanNow(popRoot);
+check("sync scan tags the popup panel pre-paint", popPanel.getAttribute(SURFACE_ATTR), "lg");
+check("sync scan normalizes the popup's nested fills pre-paint", popRow.style.backgroundColor, "rgba(80, 90, 120, 0.24)");
+check("sync scan leaves the popup's panel tint at the float floor", popPanel.style.backgroundColor, "rgba(255, 255, 255, 0.55)");
+
+// the settings dialog mounts as an inline fixed shell inside the sidebar;
+// the sync pass must tag its panel exactly like the idle pass does
+const syncDlgPanel = makeEl({ bg: "rgba(246, 247, 252, 0.85)", w: 800, h: 800 });
+const syncDlgShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, position: "fixed", children: [syncDlgPanel] });
+sandbox.document.body = syncDlgShell;
+const scanner16 = createSurfaceScanner();
+scanner16.setTintScale(0.5);
+scanner16.scanNow(syncDlgShell);
+check("sync scan tags the dialog panel behind a transparent fixed shell", syncDlgPanel.getAttribute(SURFACE_ATTR), "lg");
+check("sync scan tints the dialog panel like the idle pass", syncDlgPanel.style.backgroundColor, "rgba(246, 247, 252, 0.55)");
+
+// an in-flow mount (streamed markdown) must not be dragged into the sync
+// path: the probe budget runs out before deep content, and the idle pass
+// finishes the job
+const deepPanel = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 400, h: 300 });
+let deepRoot = deepPanel;
+for (let d = 0; d < 60; d++) {
+  deepRoot = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 400, h: 300, children: [deepRoot] });
+}
+sandbox.document.body = deepRoot;
+const scanner17 = createSurfaceScanner();
+scanner17.scanNow(deepRoot);
+check("sync probe does not reach deep in-flow content", deepPanel.hasAttribute(SHEET_ATTR), false);
+scanner17.add(deepRoot);
+check("idle pass finishes the deep in-flow surface", deepPanel.hasAttribute(SHEET_ATTR), true);
+
+/* ── regression: theme switch re-tints without stripping ─────────────
+   The theme runtime rewrites every token as body inline styles. The old
+   retag stripped ALL markers first and rebuilt in idle slices: the frost
+   vanished the instant the strip ran and crept back over several frames —
+   the reported theme-switch "glass appears out of nothing" flash. The soft
+   retag keeps every marker (frost continuous, atomic for the first painted
+   frame) and only rewrites inline tints from the freshly computed colours. */
+
+const swRow = makeEl({ bg: "rgba(80, 90, 120, 0.8)", w: 380, h: 60 });
+const swPanel = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 420, h: 700, children: [swRow] });
+const swShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [swPanel] });
+sandbox.document.body = swShell;
+const scanner18 = createSurfaceScanner();
+scanner18.setTintScale(0.3);
+scanner18.add(swShell);
+check("switch fixture: panel is a sheet", swPanel.hasAttribute(SHEET_ATTR), true);
+check("switch fixture: row is tinted", swRow.style.backgroundColor, "rgba(80, 90, 120, 0.24)");
+// the theme runtime rewrites the tokens: same structure, new colours
+swPanel.computed.backgroundColor = "rgba(26, 33, 56, 0.7)";
+swRow.computed.backgroundColor = "rgba(30, 40, 70, 0.8)";
+scanner18.retag();
+check("theme switch keeps the sheet marker", swPanel.hasAttribute(SHEET_ATTR), true);
+check("theme switch re-tints the row from the new token colour", swRow.style.backgroundColor, "rgba(30, 40, 70, 0.24)");
+check("theme switch records the row's new original colour", swRow.getAttribute(TINT_ATTR), "rgba(30, 40, 70, 0.8)");
+
+// merges survive a theme switch: the pair paints one token, so it is still
+// a same-colour pair under the new tokens — the zeroing must not blink.
+// (The fake computed style does not apply the merge rule's transparent
+// background, so the test updates it the way a real engine would.)
+const swRepeat = makeEl({ bg: SURFACE_BG, w: 300, h: 100 });
+const swTraj = makeEl({ bg: SURFACE_BG, w: 420, h: 800, children: [swRepeat] });
+const swTrajShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [swTraj] });
+sandbox.document.body = swTrajShell;
+const scanner19 = createSurfaceScanner();
+scanner19.add(swTrajShell);
+check("switch fixture: repeat is zeroed", swRepeat.hasAttribute(MERGE_ATTR), true);
+swTraj.computed.backgroundColor = "rgba(20, 24, 40, 0.6)";
+swRepeat.computed.backgroundColor = "rgba(0, 0, 0, 0)";   // merge rule paints transparent
+scanner19.retag();
+check("theme switch keeps the repeat zeroed", swRepeat.hasAttribute(MERGE_ATTR), true);
+check("theme switch does not tint a merged repeat", swRepeat.hasAttribute(TINT_ATTR), false);
+
+// first activation: no markers exist yet, so retag degrades to a full
+// incremental scan instead of the soft re-tint
+const freshPanel = makeEl({ bg: "rgba(255, 255, 255, 0.7)", w: 420, h: 700 });
+const freshShell = makeEl({ bg: "rgba(0, 0, 0, 0)", w: 1440, h: 900, children: [freshPanel] });
+sandbox.document.body = freshShell;
+const scanner20 = createSurfaceScanner();
+scanner20.setTintScale(0.3);
+scanner20.retag();
+check("first-activation retag tags surfaces", freshPanel.hasAttribute(SHEET_ATTR), true);
+
 /* ── nested fills are tinted, not stacked ─────────────────────────────
    A fill designed for an opaque plate only tints it. Over glass it tints AND
    adds opacity, so a panel whose rows each carry a fill (trajectory) goes
